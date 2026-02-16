@@ -10,109 +10,109 @@ Set FontSize 14
 Set Width 1200
 Set Height 700
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 80ms
+Set TypingSpeed 50ms
 
 # Start kr
 Type "kr"
 Enter
-Sleep 4s
+Sleep 3s
 
 # Navigate pods
 Type "j"
-Sleep 400ms
+Sleep 200ms
 Type "j"
-Sleep 400ms
+Sleep 200ms
 Type "j"
-Sleep 600ms
+Sleep 300ms
 
-# View pod logs (while pod is selected)
+# View pod logs
 Type "l"
-Sleep 3s
+Sleep 2s
 
 # Scroll logs up
 Type "k"
-Sleep 300ms
+Sleep 150ms
 Type "k"
-Sleep 300ms
+Sleep 150ms
 Type "k"
-Sleep 300ms
+Sleep 150ms
 
 # Resume auto-follow
 Type "G"
-Sleep 2s
+Sleep 1s
 
-# Exit logs back to list
+# Exit logs
 Escape
-Sleep 500ms
+Sleep 300ms
 
 # Filter pods
 Type "/"
-Sleep 300ms
+Sleep 200ms
 Type "api"
-Sleep 1500ms
+Sleep 800ms
 Escape
-Sleep 500ms
+Sleep 300ms
 
 # Switch to Deployments tab
 Tab
-Sleep 1500ms
+Sleep 1s
 
 # Navigate deployments
 Type "j"
-Sleep 300ms
+Sleep 200ms
 Type "j"
-Sleep 500ms
+Sleep 300ms
 
 # Switch to Secrets tab
 Tab
-Sleep 1500ms
+Sleep 1s
 
 # Navigate secrets
 Type "j"
-Sleep 300ms
+Sleep 200ms
 Type "j"
-Sleep 400ms
+Sleep 200ms
 
-# Decode secret (Enter to open modal)
+# Decode secret
 Enter
-Sleep 1500ms
+Sleep 1s
 
 # Reveal secret values
 Type "r"
-Sleep 1500ms
+Sleep 1s
 
 # Navigate secret keys
 Type "j"
-Sleep 400ms
+Sleep 200ms
 Type "j"
-Sleep 400ms
+Sleep 200ms
 
 # Copy secret value to clipboard
 Type "c"
-Sleep 1500ms
+Sleep 1s
 
 # Close secret modal
 Escape
-Sleep 500ms
+Sleep 300ms
 
 # Go back to Pods
 Tab
-Sleep 1500ms
+Sleep 1s
 
 # Switch namespace
 Type "n"
-Sleep 1s
+Sleep 600ms
 Type "j"
-Sleep 300ms
+Sleep 200ms
 Enter
-Sleep 3s
+Sleep 2s
 
 # Navigate in new namespace
 Type "j"
-Sleep 300ms
+Sleep 200ms
 Type "j"
-Sleep 500ms
+Sleep 300ms
 
 # Quit
 Type "q"
-Sleep 500ms
+Sleep 300ms
