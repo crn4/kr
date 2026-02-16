@@ -1,6 +1,6 @@
 # VHS demo script for kr
 # Install VHS: https://github.com/charmbracelet/vhs
-# Run: vhs demo.tape
+# Run: vhs assets/demo.tape
 #
 # Prerequisites: a working kubeconfig with accessible cluster
 
@@ -66,6 +66,34 @@ Sleep 500ms
 # Switch to Secrets tab
 Tab
 Sleep 1500ms
+
+# Navigate secrets
+Type "j"
+Sleep 300ms
+Type "j"
+Sleep 400ms
+
+# Decode secret (Enter to open modal)
+Enter
+Sleep 1500ms
+
+# Reveal secret values
+Type "r"
+Sleep 1500ms
+
+# Navigate secret keys
+Type "j"
+Sleep 400ms
+Type "j"
+Sleep 400ms
+
+# Copy secret value to clipboard
+Type "c"
+Sleep 1500ms
+
+# Close secret modal
+Escape
+Sleep 500ms
 
 # Go back to Pods
 Tab
