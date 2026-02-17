@@ -24,10 +24,10 @@ fn handle_popup_input(app: &mut App, key: KeyEvent) {
             app.mode = AppMode::List;
         }
         KeyCode::Enter => {
-            if let Some(i) = app.popup_state.selected() {
-                if let Some(ctx) = app.available_contexts.get(i) {
-                    app.pending_context = Some(ctx.clone());
-                }
+            if let Some(i) = app.popup_state.selected()
+                && let Some(ctx) = app.available_contexts.get(i)
+            {
+                app.pending_context = Some(ctx.clone());
             }
             app.mode = AppMode::List;
         }
@@ -84,7 +84,8 @@ fn handle_namespace_input(app: &mut App, key: KeyEvent) {
                 // Exit typing mode, return to scroll
                 app.namespace_input.clear();
                 app.namespace_typing = false;
-                app.filtered_namespaces.clone_from(&app.available_namespaces);
+                app.filtered_namespaces
+                    .clone_from(&app.available_namespaces);
                 // Restore selection to current ns
                 let idx = app
                     .filtered_namespaces
@@ -267,17 +268,19 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('n') => {
             app.namespace_input.clear();
             app.namespace_typing = false;
-            app.filtered_namespaces.clone_from(&app.available_namespaces);
+            app.filtered_namespaces
+                .clone_from(&app.available_namespaces);
             // Pre-select current namespace in the list
             let current_idx = app
                 .filtered_namespaces
                 .iter()
                 .position(|ns| *ns == app.current_namespace);
-            app.popup_state.select(current_idx.or(if app.filtered_namespaces.is_empty() {
-                None
-            } else {
-                Some(0)
-            }));
+            app.popup_state
+                .select(current_idx.or(if app.filtered_namespaces.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                }));
             app.mode = AppMode::NamespaceSelect;
         }
         KeyCode::Char('/') => {
@@ -318,10 +321,10 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
 
         // Multi-select
         KeyCode::Char(' ') if app.active_tab != ResourceType::Secret => {
-            if let Some(i) = app.table_state.selected() {
-                if !app.selected_indices.remove(&i) {
-                    app.selected_indices.insert(i);
-                }
+            if let Some(i) = app.table_state.selected()
+                && !app.selected_indices.remove(&i)
+            {
+                app.selected_indices.insert(i);
             }
         }
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -425,20 +428,19 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
                     {
                         Ok(output) if output.status.success() => {
                             let text = String::from_utf8_lossy(&output.stdout);
-                            let lines: Vec<String> =
-                                text.lines().map(|l| l.to_string()).collect();
+                            let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
                             let _ = tx.send(KubeResourceEvent::DescribeReady(lines));
                         }
                         Ok(output) => {
                             let stderr = String::from_utf8_lossy(&output.stderr);
                             let _ = tx.send(KubeResourceEvent::Error(format!(
-                                "Describe failed: {}", stderr.trim()
+                                "Describe failed: {}",
+                                stderr.trim()
                             )));
                         }
                         Err(e) => {
-                            let _ = tx.send(KubeResourceEvent::Error(format!(
-                                "Describe failed: {e}"
-                            )));
+                            let _ =
+                                tx.send(KubeResourceEvent::Error(format!("Describe failed: {e}")));
                         }
                     }
                 });
@@ -511,10 +513,10 @@ fn handle_secret_modal_input(app: &mut App, key: KeyEvent) {
             app.selected_secret_decoded = None;
         }
         KeyCode::Char('j') | KeyCode::Down => {
-            if let Some(decoded) = &app.selected_secret_decoded {
-                if app.secret_scroll < decoded.len().saturating_sub(1) {
-                    app.secret_scroll += 1;
-                }
+            if let Some(decoded) = &app.selected_secret_decoded
+                && app.secret_scroll < decoded.len().saturating_sub(1)
+            {
+                app.secret_scroll += 1;
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
@@ -524,26 +526,24 @@ fn handle_secret_modal_input(app: &mut App, key: KeyEvent) {
             app.secret_revealed = !app.secret_revealed;
         }
         KeyCode::Char('c') => {
-            // Copy selected secret value to clipboard (auto-clears after 15s)
-            if let Some(decoded) = &app.selected_secret_decoded {
-                if let Some((key, value)) = decoded.get(app.secret_scroll) {
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(value.clone())) {
-                        Ok(()) => {
-                            // Cancel previous auto-clear timer
-                            if let Some(handle) = app.clipboard_clear_task.take() {
-                                handle.abort();
-                            }
-                            app.set_success(format!("Copied '{key}' to clipboard (clears in 15s)"));
-                            let handle = tokio::spawn(async {
-                                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                                if let Ok(mut cb) = arboard::Clipboard::new() {
-                                    let _ = cb.set_text(String::new());
-                                }
-                            });
-                            app.clipboard_clear_task = Some(handle.abort_handle());
+            if let Some(decoded) = &app.selected_secret_decoded
+                && let Some((key, value)) = decoded.get(app.secret_scroll)
+            {
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(value.clone())) {
+                    Ok(()) => {
+                        if let Some(handle) = app.clipboard_clear_task.take() {
+                            handle.abort();
                         }
-                        Err(e) => app.set_error(format!("Clipboard error: {e}")),
+                        app.set_success(format!("Copied '{key}' to clipboard (clears in 15s)"));
+                        let handle = tokio::spawn(async {
+                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                            if let Ok(mut cb) = arboard::Clipboard::new() {
+                                let _ = cb.set_text(String::new());
+                            }
+                        });
+                        app.clipboard_clear_task = Some(handle.abort_handle());
                     }
+                    Err(e) => app.set_error(format!("Clipboard error: {e}")),
                 }
             }
         }
@@ -598,7 +598,6 @@ fn handle_describe_input(app: &mut App, key: KeyEvent) {
 fn handle_shell_input(app: &mut App, key: KeyEvent) {
     use std::io::Write;
 
-    // Ctrl+Q exits the embedded shell
     if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.shell_session = None;
         app.mode = AppMode::List;
@@ -606,21 +605,34 @@ fn handle_shell_input(app: &mut App, key: KeyEvent) {
     }
 
     let bytes = key_to_pty_bytes(key);
-    if !bytes.is_empty() {
-        if let Some(session) = &mut app.shell_session {
-            let _ = session.writer.write_all(&bytes);
-        }
+    if !bytes.is_empty()
+        && let Some(session) = &mut app.shell_session
+    {
+        let _ = session.writer.write_all(&bytes);
     }
 }
 
 fn key_to_pty_bytes(key: KeyEvent) -> Vec<u8> {
-    // Ctrl+<char> -> control code
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let KeyCode::Char(c) = key.code {
-            let code = (c as u8).wrapping_sub(b'a').wrapping_add(1);
-            return vec![code];
+    let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && let KeyCode::Char(c) = key.code
+    {
+        let code = (c as u8).wrapping_sub(b'a').wrapping_add(1);
+        if has_alt {
+            return vec![0x1b, code];
         }
+        return vec![code];
     }
+
+    if has_alt && let KeyCode::Char(c) = key.code {
+        let mut bytes = vec![0x1b];
+        let mut buf = [0u8; 4];
+        c.encode_utf8(&mut buf);
+        bytes.extend_from_slice(&buf[..c.len_utf8()]);
+        return bytes;
+    }
+
     match key.code {
         KeyCode::Char(c) => {
             let mut buf = [0u8; 4];
@@ -659,8 +671,7 @@ fn handle_scale_input(app: &mut App, key: KeyEvent) {
                     app.set_error("Replica count must be <= 1000".to_string());
                 } else if let Some(res) = app.get_selected_resource() {
                     let name = res.name().to_owned();
-                    app.pending_action =
-                        Some(PendingAction::ScaleDeployment { name, replicas });
+                    app.pending_action = Some(PendingAction::ScaleDeployment { name, replicas });
                     app.mode = AppMode::Confirm;
                     return;
                 }
@@ -688,8 +699,7 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                         let indices: Vec<usize> = if app.selected_indices.is_empty() {
                             app.table_state.selected().into_iter().collect()
                         } else {
-                            let mut v: Vec<usize> =
-                                app.selected_indices.iter().copied().collect();
+                            let mut v: Vec<usize> = app.selected_indices.iter().copied().collect();
                             v.sort_unstable();
                             v
                         };
@@ -700,36 +710,32 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                                 let tx = app.event_tx.clone();
                                 match item {
                                     KubeResource::Pod(p) => {
-                                        let name =
-                                            p.metadata.name.clone().unwrap_or_default();
+                                        let name = p.metadata.name.clone().unwrap_or_default();
                                         tokio::spawn(async move {
-                                            let result = crate::k8s::actions::delete_pod(
-                                                client, &ns, &name,
-                                            )
-                                            .await;
+                                            let result =
+                                                crate::k8s::actions::delete_pod(client, &ns, &name)
+                                                    .await;
                                             let _ = tx.send(match result {
-                                                Ok(()) => KubeResourceEvent::Success(
-                                                    format!("Pod '{name}' deleted"),
-                                                ),
-                                                Err(e) => KubeResourceEvent::Error(
-                                                    format!("Delete '{name}' failed: {e}"),
-                                                ),
+                                                Ok(()) => KubeResourceEvent::Success(format!(
+                                                    "Pod '{name}' deleted"
+                                                )),
+                                                Err(e) => KubeResourceEvent::Error(format!(
+                                                    "Delete '{name}' failed: {e}"
+                                                )),
                                             });
                                         });
                                     }
                                     KubeResource::Deployment(d) => {
-                                        let name =
-                                            d.metadata.name.clone().unwrap_or_default();
+                                        let name = d.metadata.name.clone().unwrap_or_default();
                                         tokio::spawn(async move {
-                                            let result =
-                                                crate::k8s::actions::delete_deployment(
-                                                    client, &ns, &name,
-                                                )
-                                                .await;
+                                            let result = crate::k8s::actions::delete_deployment(
+                                                client, &ns, &name,
+                                            )
+                                            .await;
                                             let _ = tx.send(match result {
-                                                Ok(()) => KubeResourceEvent::Success(
-                                                    format!("Deployment '{name}' deleted"),
-                                                ),
+                                                Ok(()) => KubeResourceEvent::Success(format!(
+                                                    "Deployment '{name}' deleted"
+                                                )),
                                                 Err(e) => KubeResourceEvent::Error(format!(
                                                     "Delete '{name}' failed: {e}"
                                                 )),
@@ -747,12 +753,11 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                         let tx = app.event_tx.clone();
                         tokio::spawn(async move {
                             let result =
-                                crate::k8s::actions::rollout_restart(client, &ns, &name)
-                                    .await;
+                                crate::k8s::actions::rollout_restart(client, &ns, &name).await;
                             let _ = tx.send(match result {
-                                Ok(()) => KubeResourceEvent::Success(format!(
-                                    "Rollout restart: '{name}'"
-                                )),
+                                Ok(()) => {
+                                    KubeResourceEvent::Success(format!("Rollout restart: '{name}'"))
+                                }
                                 Err(e) => KubeResourceEvent::Error(format!(
                                     "Restart '{name}' failed: {e}"
                                 )),
@@ -764,17 +769,16 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                         let ns = app.current_namespace.clone();
                         let tx = app.event_tx.clone();
                         tokio::spawn(async move {
-                            let result = crate::k8s::actions::scale_deployment(
-                                client, &ns, &name, replicas,
-                            )
-                            .await;
+                            let result =
+                                crate::k8s::actions::scale_deployment(client, &ns, &name, replicas)
+                                    .await;
                             let _ = tx.send(match result {
                                 Ok(()) => KubeResourceEvent::Success(format!(
                                     "'{name}' scaled to {replicas} replicas"
                                 )),
-                                Err(e) => KubeResourceEvent::Error(format!(
-                                    "Scale '{name}' failed: {e}"
-                                )),
+                                Err(e) => {
+                                    KubeResourceEvent::Error(format!("Scale '{name}' failed: {e}"))
+                                }
                             });
                         });
                     }
@@ -946,7 +950,10 @@ mod tests {
     #[tokio::test]
     async fn ctrl_c_quits() {
         let mut app = App::new_test();
-        handle_input(&mut app, key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        handle_input(
+            &mut app,
+            key_with_mod(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
         assert!(app.should_quit);
     }
 
@@ -1255,7 +1262,11 @@ mod tests {
     async fn confirm_n_cancels() {
         let mut app = App::new_test();
         app.mode = AppMode::Confirm;
-        app.pending_action = Some(PendingAction::DeleteResource { count: 1, kind: "pod(s)", names: vec!["test".into()] });
+        app.pending_action = Some(PendingAction::DeleteResource {
+            count: 1,
+            kind: "pod(s)",
+            names: vec!["test".into()],
+        });
 
         handle_input(&mut app, key(KeyCode::Char('n')));
         assert_eq!(app.mode, AppMode::List);
@@ -1266,7 +1277,11 @@ mod tests {
     async fn confirm_esc_cancels() {
         let mut app = App::new_test();
         app.mode = AppMode::Confirm;
-        app.pending_action = Some(PendingAction::DeleteResource { count: 1, kind: "pod(s)", names: vec!["test".into()] });
+        app.pending_action = Some(PendingAction::DeleteResource {
+            count: 1,
+            kind: "pod(s)",
+            names: vec!["test".into()],
+        });
 
         handle_input(&mut app, key(KeyCode::Esc));
         assert_eq!(app.mode, AppMode::List);
@@ -1383,5 +1398,32 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Esc));
         assert_eq!(app.filter_query, "");
         assert_eq!(app.filtered_items.len(), 2);
+    }
+
+    #[test]
+    fn pty_alt_char_sends_esc_prefix() {
+        let ev = key_with_mod(KeyCode::Char(':'), KeyModifiers::ALT);
+        assert_eq!(key_to_pty_bytes(ev), vec![0x1b, b':']);
+    }
+
+    #[test]
+    fn pty_alt_letter_sends_esc_prefix() {
+        let ev = key_with_mod(KeyCode::Char('d'), KeyModifiers::ALT);
+        assert_eq!(key_to_pty_bytes(ev), vec![0x1b, b'd']);
+    }
+
+    #[test]
+    fn pty_ctrl_alt_sends_esc_plus_control_code() {
+        let ev = key_with_mod(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_eq!(key_to_pty_bytes(ev), vec![0x1b, 0x03]);
+    }
+
+    #[test]
+    fn pty_plain_char_no_esc_prefix() {
+        let ev = key(KeyCode::Char(':'));
+        assert_eq!(key_to_pty_bytes(ev), vec![b':']);
     }
 }

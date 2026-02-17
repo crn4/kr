@@ -1,6 +1,6 @@
 [package]
 name = "kr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A fast Kubernetes TUI for managing pods, deployments, and secrets"
 authors = ["crn4"]
