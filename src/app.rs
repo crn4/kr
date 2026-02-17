@@ -4,8 +4,8 @@ use k8s_openapi::api::{
     apps::v1::Deployment,
     core::v1::{Pod, Secret},
 };
-use kube::runtime::reflector::Store;
 use kube::Client;
+use kube::runtime::reflector::Store;
 use ratatui::widgets::{ListState, TableState};
 use std::collections::{HashSet, VecDeque};
 use std::io::Read;
@@ -93,55 +93,63 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(client: Client) -> anyhow::Result<(Self, tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>)> {
-        let namespace = crate::k8s::config::get_context_namespace()
-            .unwrap_or_else(|_| "default".to_string());
+    pub async fn new(
+        client: Client,
+    ) -> anyhow::Result<(
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
+    )> {
+        let namespace =
+            crate::k8s::config::get_context_namespace().unwrap_or_else(|_| "default".to_string());
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        Ok((Self {
-            client,
-            current_namespace: namespace,
-            mode: AppMode::List,
-            active_tab: ResourceType::Pod,
-            should_quit: false,
-            pod_store: None,
-            deployment_store: None,
-            secret_store: None,
-            event_tx: tx,
-            items: Vec::new(),
-            filtered_items: Vec::new(),
-            table_state: TableState::default(),
-            filter_query: String::new(),
-            selected_indices: HashSet::new(),
-            selected_secret_decoded: None,
-            log_buffer: VecDeque::new(),
-            log_task: None,
-            log_scroll_offset: None,
-            current_context: "default".into(), // Will be updated
-            pending_context: None,
-            available_contexts: Vec::new(),
-            available_namespaces: Vec::new(),
-            filtered_namespaces: Vec::new(),
-            namespace_input: String::new(),
-            namespace_typing: false,
-            popup_state: ListState::default(),
-            last_error: None,
-            last_success: None,
-            message_time: None,
-            is_loading: true,
-            loading_since: Some(Instant::now()),
-            dirty: true,
-            secret_scroll: 0,
-            secret_table_state: TableState::default(),
-            secret_revealed: false,
-            scale_input: String::new(),
-            pending_action: None,
-            describe_content: Vec::new(),
-            describe_scroll: 0,
-            shell_session: None,
-            clipboard_clear_task: None,
-            app_state: AppState::load(),
-        }, rx))
+        Ok((
+            Self {
+                client,
+                current_namespace: namespace,
+                mode: AppMode::List,
+                active_tab: ResourceType::Pod,
+                should_quit: false,
+                pod_store: None,
+                deployment_store: None,
+                secret_store: None,
+                event_tx: tx,
+                items: Vec::new(),
+                filtered_items: Vec::new(),
+                table_state: TableState::default(),
+                filter_query: String::new(),
+                selected_indices: HashSet::new(),
+                selected_secret_decoded: None,
+                log_buffer: VecDeque::new(),
+                log_task: None,
+                log_scroll_offset: None,
+                current_context: "default".into(), // Will be updated
+                pending_context: None,
+                available_contexts: Vec::new(),
+                available_namespaces: Vec::new(),
+                filtered_namespaces: Vec::new(),
+                namespace_input: String::new(),
+                namespace_typing: false,
+                popup_state: ListState::default(),
+                last_error: None,
+                last_success: None,
+                message_time: None,
+                is_loading: true,
+                loading_since: Some(Instant::now()),
+                dirty: true,
+                secret_scroll: 0,
+                secret_table_state: TableState::default(),
+                secret_revealed: false,
+                scale_input: String::new(),
+                pending_action: None,
+                describe_content: Vec::new(),
+                describe_scroll: 0,
+                shell_session: None,
+                clipboard_clear_task: None,
+                app_state: AppState::load(),
+            },
+            rx,
+        ))
     }
 
     pub fn next_tab(&mut self) {
@@ -222,8 +230,8 @@ impl App {
         tokio::spawn(async move {
             // Try kube-rs API first
             use k8s_openapi::api::core::v1::Namespace;
-            use kube::api::ListParams;
             use kube::Api;
+            use kube::api::ListParams;
             let ns_api: Api<Namespace> = Api::all(client);
             if let Ok(ns_list) = ns_api.list(&ListParams::default()).await {
                 let namespaces: Vec<String> = ns_list
@@ -234,37 +242,39 @@ impl App {
                 return;
             }
 
-            // Fallback: try kubectl CLI (handles Teleport/exec auth plugins)
             if let Ok(output) = tokio::process::Command::new("kubectl")
                 .args([
-                    "get", "namespaces", "--context", &ctx,
-                    "-o", "jsonpath={.items[*].metadata.name}",
+                    "get",
+                    "namespaces",
+                    "--context",
+                    &ctx,
+                    "-o",
+                    "jsonpath={.items[*].metadata.name}",
                 ])
                 .output()
                 .await
+                && output.status.success()
             {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout);
-                    let namespaces: Vec<String> = text
-                        .split_whitespace()
-                        .map(|s| s.to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !namespaces.is_empty() {
-                        let _ = tx.send(KubeResourceEvent::NamespacesLoaded(namespaces));
-                        return;
-                    }
+                let text = String::from_utf8_lossy(&output.stdout);
+                let namespaces: Vec<String> = text
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !namespaces.is_empty() {
+                    let _ = tx.send(KubeResourceEvent::NamespacesLoaded(namespaces));
+                    return;
                 }
             }
 
-            // Last resort: just the current namespace
             let _ = tx.send(KubeResourceEvent::NamespacesLoaded(vec![current_ns]));
         });
     }
 
     pub fn update_namespace_filter(&mut self) {
         if self.namespace_input.is_empty() {
-            self.filtered_namespaces.clone_from(&self.available_namespaces);
+            self.filtered_namespaces
+                .clone_from(&self.available_namespaces);
         } else {
             let query = self.namespace_input.to_lowercase();
             self.filtered_namespaces = self
@@ -274,7 +284,6 @@ impl App {
                 .cloned()
                 .collect();
         }
-        // Reset selection
         if self.filtered_namespaces.is_empty() {
             self.popup_state.select(None);
         } else {
@@ -297,19 +306,18 @@ impl App {
     pub fn clear_stale_messages(&mut self) {
         if let Some(t) = self.message_time {
             let elapsed = t.elapsed().as_secs();
-            // Success messages clear after 5s
             if self.last_success.is_some() && elapsed >= 5 {
                 self.last_success = None;
                 if self.last_error.is_none() {
                     self.message_time = None;
                 }
             }
-            // Errors persist for 15s (access denied errors persist until tab/context switch)
-            if let Some(err) = &self.last_error {
-                if !err.starts_with("Access denied") && elapsed >= 15 {
-                    self.last_error = None;
-                    self.message_time = None;
-                }
+            if let Some(err) = &self.last_error
+                && !err.starts_with("Access denied")
+                && elapsed >= 15
+            {
+                self.last_error = None;
+                self.message_time = None;
             }
         }
     }
@@ -318,8 +326,15 @@ impl App {
         use portable_pty::CommandBuilder;
         let mut cmd = CommandBuilder::new("kubectl");
         cmd.args([
-            "exec", "-it", pod_name, "-n", namespace, "--context",
-            &self.current_context, "--", "sh",
+            "exec",
+            "-it",
+            pod_name,
+            "-n",
+            namespace,
+            "--context",
+            &self.current_context,
+            "--",
+            "sh",
         ]);
         self.spawn_pty_session(cmd);
     }
@@ -327,12 +342,20 @@ impl App {
     pub fn start_kubectl_edit(&mut self, kind: &str, name: &str, namespace: &str) {
         use portable_pty::CommandBuilder;
         let mut cmd = CommandBuilder::new("kubectl");
-        cmd.args(["edit", kind, name, "-n", namespace, "--context", &self.current_context]);
+        cmd.args([
+            "edit",
+            kind,
+            name,
+            "-n",
+            namespace,
+            "--context",
+            &self.current_context,
+        ]);
         self.spawn_pty_session(cmd);
     }
 
     fn spawn_pty_session(&mut self, cmd: portable_pty::CommandBuilder) {
-        use portable_pty::{native_pty_system, PtySize};
+        use portable_pty::{PtySize, native_pty_system};
 
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         let pty_rows = (rows * 80 / 100).saturating_sub(2).max(10);
@@ -390,7 +413,10 @@ impl App {
                         break;
                     }
                     Ok(n) => {
-                        if tx.send(KubeResourceEvent::ShellOutput(buf[..n].to_vec())).is_err() {
+                        if tx
+                            .send(KubeResourceEvent::ShellOutput(buf[..n].to_vec()))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -529,8 +555,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::models::KubeResource;
-    use k8s_openapi::api::core::v1::{Pod, Secret};
     use k8s_openapi::ByteString;
+    use k8s_openapi::api::core::v1::{Pod, Secret};
     use std::collections::BTreeMap;
 
     fn make_pod(name: &str) -> KubeResource {
@@ -605,7 +631,11 @@ mod tests {
     #[tokio::test]
     async fn filter_matches_substring() {
         let mut app = App::new_test();
-        app.items = vec![make_pod("nginx"), make_pod("redis"), make_pod("nginx-proxy")];
+        app.items = vec![
+            make_pod("nginx"),
+            make_pod("redis"),
+            make_pod("nginx-proxy"),
+        ];
         app.filter_query = "nginx".to_string();
         app.update_filter();
 
@@ -693,7 +723,10 @@ mod tests {
     async fn decode_selected_secret_extracts_data() {
         let mut app = App::new_test();
         app.active_tab = ResourceType::Secret;
-        app.filtered_items = vec![make_secret("my-secret", vec![("user", "admin"), ("pass", "s3cret")])];
+        app.filtered_items = vec![make_secret(
+            "my-secret",
+            vec![("user", "admin"), ("pass", "s3cret")],
+        )];
         app.table_state.select(Some(0));
 
         app.decode_selected_secret();
