@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{Event, EventStream};
-use futures::StreamExt;
-use ratatui::{backend::Backend, Terminal};
+use futures::{FutureExt, StreamExt};
+use ratatui::{Terminal, backend::Backend};
 use std::time::Duration;
 use tokio::time;
 
@@ -66,20 +66,98 @@ fn create_watcher(app: &mut App) -> BoxStream<'static, KubeResourceEvent> {
     }
 }
 
+fn handle_watcher_event(
+    app: &mut App,
+    event: KubeResourceEvent,
+    watcher: &mut BoxStream<'static, KubeResourceEvent>,
+) -> bool {
+    match event {
+        KubeResourceEvent::WatcherForbidden(msg) => {
+            let resource_kind = match app.active_tab {
+                ResourceType::Pod => "pods",
+                ResourceType::Deployment => "deployments",
+                ResourceType::Secret => "secrets",
+            };
+            let short_msg = if msg.is_empty() {
+                format!("Access denied: cannot list {resource_kind}")
+            } else {
+                format!("Access denied: {resource_kind} — {msg}")
+            };
+            app.set_error(short_msg);
+            app.is_loading = false;
+            app.loading_since = None;
+            *watcher = Box::pin(futures::stream::pending());
+            app.dirty = true;
+            false
+        }
+        KubeResourceEvent::Error(msg) => {
+            app.set_error(msg);
+            app.dirty = true;
+            false
+        }
+        KubeResourceEvent::InitialListDone => {
+            app.refresh_items();
+            app.is_loading = false;
+            app.loading_since = None;
+            app.dirty = true;
+            false
+        }
+        _ => !app.is_loading,
+    }
+}
+
+fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
+    match event {
+        KubeResourceEvent::Refresh
+        | KubeResourceEvent::InitialListDone
+        | KubeResourceEvent::WatcherForbidden(_) => {}
+        KubeResourceEvent::Log(line) => {
+            app.push_log_line(line);
+        }
+        KubeResourceEvent::Error(e) => {
+            app.set_error(e);
+        }
+        KubeResourceEvent::Success(msg) => {
+            app.set_success(msg);
+        }
+        KubeResourceEvent::ShellOutput(data) => {
+            if let Some(session) = &mut app.shell_session {
+                session.parser.process(&data);
+            }
+        }
+        KubeResourceEvent::ShellExited => {
+            app.shell_session = None;
+            if app.mode == AppMode::ShellView {
+                app.mode = AppMode::List;
+                app.set_success("Shell session ended".to_string());
+            }
+        }
+        KubeResourceEvent::DescribeReady(lines) => {
+            app.describe_content = lines;
+            app.describe_scroll = 0;
+            app.mode = AppMode::DescribeView;
+        }
+        KubeResourceEvent::NamespacesLoaded(namespaces) => {
+            let ctx = app.current_context.clone();
+            app.available_namespaces = app.app_state.merge_namespaces(&ctx, &namespaces);
+            app.app_state.save();
+        }
+    }
+    app.dirty = true;
+}
+
 pub async fn run<B: Backend + std::io::Write>(
     terminal: &mut Terminal<B>,
     mut app: App,
     mut event_rx: tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
 ) -> Result<()> {
     let mut reader = EventStream::new();
-    // UI refresh ticker — caps redraw rate, also updates dynamic fields like Age
     let mut ticker = time::interval(Duration::from_millis(250));
 
     let mut current_tab = app.active_tab;
     let mut current_ns = app.current_namespace.clone();
     let mut watcher = create_watcher(&mut app);
 
-    // Initial context load
     if let Ok(ctxs) = crate::k8s::config::list_contexts() {
         app.available_contexts = ctxs;
     }
@@ -87,17 +165,13 @@ pub async fn run<B: Backend + std::io::Write>(
         app.current_context = ctx;
     }
 
-    // Load saved namespaces immediately, then discover more in background
     app.available_namespaces = app.app_state.get_namespaces(&app.current_context);
     if !app.available_namespaces.contains(&app.current_namespace) {
         app.available_namespaces.push(app.current_namespace.clone());
         app.available_namespaces.sort();
     }
 
-    // Initial refresh
     app.refresh_items();
-
-    // Discover namespaces from API in background
     app.load_namespaces();
 
     let mut current_ctx = app.current_context.clone();
@@ -113,10 +187,7 @@ pub async fn run<B: Backend + std::io::Write>(
             return Ok(());
         }
 
-        // Handle pending context switch
         if let Some(new_ctx) = app.pending_context.take() {
-            // Temporarily suspend TUI so interactive auth plugins (e.g. Teleport tsh)
-            // can access the terminal for SSO/MFA prompts.
             crossterm::terminal::disable_raw_mode()?;
             crossterm::execute!(
                 terminal.backend_mut(),
@@ -127,7 +198,6 @@ pub async fn run<B: Backend + std::io::Write>(
 
             let result = crate::k8s::config::create_client_with_context(&new_ctx).await;
 
-            // Restore TUI
             crossterm::execute!(
                 terminal.backend_mut(),
                 crossterm::terminal::EnterAlternateScreen,
@@ -139,17 +209,14 @@ pub async fn run<B: Backend + std::io::Write>(
             match result {
                 Ok(client) => {
                     app.client = client;
-                    app.current_namespace =
-                        crate::k8s::config::get_namespace_for_context(&new_ctx);
+                    app.current_namespace = crate::k8s::config::get_namespace_for_context(&new_ctx);
                     app.current_context = new_ctx.clone();
 
-                    // Load saved namespaces for this context immediately
                     app.available_namespaces = app.app_state.get_namespaces(&new_ctx);
                     if !app.available_namespaces.contains(&app.current_namespace) {
                         app.available_namespaces.push(app.current_namespace.clone());
                         app.available_namespaces.sort();
                     }
-                    // Also try to discover more via API in the background
                     app.load_namespaces();
                 }
                 Err(e) => {
@@ -174,8 +241,11 @@ pub async fn run<B: Backend + std::io::Write>(
             app.secret_store = None;
             app.is_loading = true;
             app.loading_since = Some(std::time::Instant::now());
-            // Clear persistent "Access denied" errors from previous watcher
-            if app.last_error.as_ref().is_some_and(|e| e.starts_with("Access denied")) {
+            if app
+                .last_error
+                .as_ref()
+                .is_some_and(|e| e.starts_with("Access denied"))
+            {
                 app.last_error = None;
                 app.message_time = None;
             }
@@ -187,7 +257,6 @@ pub async fn run<B: Backend + std::io::Write>(
 
         tokio::select! {
             _ = ticker.tick() => {
-                // Periodic UI refresh for dynamic content (Age, log streaming)
                 app.clear_stale_messages();
                 app.dirty = true;
             }
@@ -198,77 +267,20 @@ pub async fn run<B: Backend + std::io::Write>(
                }
             }
             Some(event) = watcher.next() => {
-                match event {
-                    KubeResourceEvent::WatcherForbidden(msg) => {
-                        let resource_kind = match app.active_tab {
-                            ResourceType::Pod => "pods",
-                            ResourceType::Deployment => "deployments",
-                            ResourceType::Secret => "secrets",
-                        };
-                        let short_msg = if msg.is_empty() {
-                            format!("Access denied: cannot list {resource_kind}")
-                        } else {
-                            format!("Access denied: {resource_kind} — {msg}")
-                        };
-                        app.set_error(short_msg);
-                        app.is_loading = false;
-                        app.loading_since = None;
-                        // Stop retrying — replace watcher with a stream that never yields
-                        watcher = Box::pin(futures::stream::pending());
-                    }
-                    KubeResourceEvent::Error(msg) => {
-                        app.set_error(msg);
-                    }
-                    KubeResourceEvent::InitialListDone => {
-                        app.refresh_items();
-                        app.is_loading = false;
-                        app.loading_since = None;
-                    }
-                    _ => {
-                        app.refresh_items();
-                    }
+                let mut needs_refresh = handle_watcher_event(&mut app, event, &mut watcher);
+                while let Some(Some(event)) = watcher.next().now_or_never() {
+                    needs_refresh |= handle_watcher_event(&mut app, event, &mut watcher);
                 }
-                app.dirty = true;
+                if needs_refresh {
+                    app.refresh_items();
+                    app.dirty = true;
+                }
             }
             Some(event) = event_rx.recv() => {
-                match event {
-                    KubeResourceEvent::Refresh
-                    | KubeResourceEvent::InitialListDone
-                    | KubeResourceEvent::WatcherForbidden(_) => {}
-                    KubeResourceEvent::Log(line) => {
-                        app.push_log_line(line);
-                    }
-                    KubeResourceEvent::Error(e) => {
-                        app.set_error(e);
-                    }
-                    KubeResourceEvent::Success(msg) => {
-                        app.set_success(msg);
-                    }
-                    KubeResourceEvent::ShellOutput(data) => {
-                        if let Some(session) = &mut app.shell_session {
-                            session.parser.process(&data);
-                        }
-                    }
-                    KubeResourceEvent::ShellExited => {
-                        app.shell_session = None;
-                        if app.mode == AppMode::ShellView {
-                            app.mode = AppMode::List;
-                            app.set_success("Shell session ended".to_string());
-                        }
-                    }
-                    KubeResourceEvent::DescribeReady(lines) => {
-                        app.describe_content = lines;
-                        app.describe_scroll = 0;
-                        app.mode = AppMode::DescribeView;
-                    }
-                    KubeResourceEvent::NamespacesLoaded(namespaces) => {
-                        let ctx = app.current_context.clone();
-                        app.available_namespaces =
-                            app.app_state.merge_namespaces(&ctx, &namespaces);
-                        app.app_state.save();
-                    }
+                handle_channel_event(&mut app, event);
+                while let Ok(event) = event_rx.try_recv() {
+                    handle_channel_event(&mut app, event);
                 }
-                app.dirty = true;
             }
         }
     }
@@ -283,7 +295,8 @@ mod tests {
     fn make_403_response() -> ErrorResponse {
         ErrorResponse {
             status: "Failure".to_string(),
-            message: "secrets is forbidden: User \"test\" cannot list resource \"secrets\"".to_string(),
+            message: "secrets is forbidden: User \"test\" cannot list resource \"secrets\""
+                .to_string(),
             reason: "Forbidden".to_string(),
             code: 403,
         }
@@ -338,7 +351,9 @@ mod tests {
     fn map_watcher_event_403_returns_forbidden() {
         let err = watcher::Error::InitialListFailed(kube::Error::Api(make_403_response()));
         let event = map_watcher_event::<Pod>(Err(err));
-        assert!(matches!(event, KubeResourceEvent::WatcherForbidden(msg) if msg.contains("forbidden")));
+        assert!(
+            matches!(event, KubeResourceEvent::WatcherForbidden(msg) if msg.contains("forbidden"))
+        );
     }
 
     #[test]

@@ -25,7 +25,7 @@ where
 {
     let api = Api::<K>::namespaced(client, namespace);
     let (reader, writer) = reflector::store();
-    let watcher_config = watcher::Config::default().any_semantic();
+    let watcher_config = watcher::Config::default().any_semantic().page_size(5000);
     let stream = reflector(writer, watcher(api, watcher_config));
     (reader, stream)
 }
