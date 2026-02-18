@@ -73,6 +73,7 @@ kr -c "get pods -n kube-system"
 | `s` | Open shell |
 | `d` | Describe |
 | `e` | Edit |
+| `f` | Filter by pod's status |
 | `D` / `Delete` | Delete (with confirmation) |
 | `Space` | Toggle select |
 | `Ctrl+A` | Select / deselect all |
