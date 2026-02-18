@@ -113,8 +113,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.filtered_items.is_empty() && !app.is_loading {
         let msg = if app.last_error.is_some() {
-            "" // error shown in footer
-        } else if app.filter_query.is_empty() {
+            ""
+        } else if app.filter_query.is_empty() && app.status_filter.is_empty() {
             "No pods in this namespace"
         } else {
             "No pods match filter"

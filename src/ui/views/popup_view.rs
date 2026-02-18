@@ -1,21 +1,27 @@
 use crate::app::App;
 use crate::models::AppMode;
-use crate::ui::components::centered_rect;
-use crate::ui::theme::{STYLE_HIGHLIGHT, STYLE_NORMAL};
+use crate::ui::components::{centered_fixed_rect, centered_rect};
+use crate::ui::theme::*;
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
-    text::Span,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
+    layout::{Constraint, Direction, Layout},
+    style::Style,
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
 pub fn draw_popup(f: &mut Frame, app: &mut App) {
-    let area = centered_rect(50, 50, f.area());
-    f.render_widget(Clear, area);
-
     match app.mode {
-        AppMode::ContextSelect => draw_context_popup(f, app, area),
-        AppMode::NamespaceSelect => draw_namespace_popup(f, app, area),
+        AppMode::ContextSelect | AppMode::NamespaceSelect => {
+            let area = centered_rect(50, 50, f.area());
+            f.render_widget(Clear, area);
+            match app.mode {
+                AppMode::ContextSelect => draw_context_popup(f, app, area),
+                AppMode::NamespaceSelect => draw_namespace_popup(f, app, area),
+                _ => {}
+            }
+        }
+        AppMode::StatusFilter => draw_status_filter_popup(f, app),
         _ => {}
     }
 }
@@ -48,7 +54,6 @@ fn draw_context_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
 
 fn draw_namespace_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     if app.namespace_typing {
-        // Typing mode: input field + filtered list
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(0)])
@@ -78,7 +83,6 @@ fn draw_namespace_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rec
 
         f.render_stateful_widget(list, chunks[1], &mut app.popup_state);
     } else {
-        // Scroll mode: just the list
         let list_items: Vec<ListItem> = app
             .filtered_namespaces
             .iter()
@@ -96,4 +100,53 @@ fn draw_namespace_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rec
 
         f.render_stateful_widget(list, area, &mut app.popup_state);
     }
+}
+
+fn status_color(phase: &str) -> ratatui::style::Color {
+    match phase {
+        "Running" => COLOR_STATUS_RUNNING,
+        "Pending" => COLOR_STATUS_PENDING,
+        "Succeeded" => COLOR_STATUS_SUCCEEDED,
+        "Terminating" => COLOR_STATUS_TERMINATING,
+        _ => COLOR_STATUS_ERROR,
+    }
+}
+
+fn draw_status_filter_popup(f: &mut Frame, app: &mut App) {
+    let h = (app.status_filter_items.len() as u16 + 2).max(4);
+    let area = centered_fixed_rect(40, h, f.area());
+    f.render_widget(Clear, area);
+
+    let list_items: Vec<ListItem> = app
+        .status_filter_items
+        .iter()
+        .enumerate()
+        .map(|(i, (phase, count))| {
+            let marker = if app.status_filter_selected.contains(&i) {
+                "●"
+            } else {
+                " "
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{marker} "),
+                    Style::default().fg(COLOR_STATUS_RUNNING),
+                ),
+                Span::styled(phase.as_str(), Style::default().fg(status_color(phase))),
+                Span::styled(format!(" ({count})"), STYLE_NORMAL),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(list_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Filter by Status"),
+        )
+        .highlight_style(STYLE_HIGHLIGHT)
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(list, area, &mut app.status_filter_state);
 }

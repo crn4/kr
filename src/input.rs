@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::models::{AppMode, KubeResource, KubeResourceEvent, PendingAction, ResourceType};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashSet;
 
 pub fn handle_input(app: &mut App, key: KeyEvent) {
     match app.mode {
@@ -13,6 +14,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         AppMode::Confirm => handle_confirm_input(app, key),
         AppMode::ShellView => handle_shell_input(app, key),
         AppMode::DescribeView => handle_describe_input(app, key),
+        AppMode::StatusFilter => handle_status_filter_input(app, key),
         AppMode::List => handle_global_input(app, key),
     }
 }
@@ -78,15 +80,12 @@ fn select_namespace(app: &mut App, ns: String) {
 
 fn handle_namespace_input(app: &mut App, key: KeyEvent) {
     if app.namespace_typing {
-        // Typing mode: text input with filtered list
         match key.code {
             KeyCode::Esc => {
-                // Exit typing mode, return to scroll
                 app.namespace_input.clear();
                 app.namespace_typing = false;
                 app.filtered_namespaces
                     .clone_from(&app.available_namespaces);
-                // Restore selection to current ns
                 let idx = app
                     .filtered_namespaces
                     .iter()
@@ -135,7 +134,6 @@ fn handle_namespace_input(app: &mut App, key: KeyEvent) {
             _ => {}
         }
     } else {
-        // Scroll mode (default): j/k navigation
         let len = app.filtered_namespaces.len();
         match key.code {
             KeyCode::Esc => {
@@ -180,7 +178,6 @@ fn handle_namespace_input(app: &mut App, key: KeyEvent) {
 }
 
 fn log_max_scroll(app: &App) -> usize {
-    // Logs area: terminal_height - 3 (header) - 1 (footer) - 2 (borders)
     let visible = crossterm::terminal::size()
         .map(|(_, h)| (h as usize).saturating_sub(6))
         .unwrap_or(20);
@@ -203,11 +200,8 @@ fn handle_log_input(app: &mut App, key: KeyEvent) {
                 if *offset < max {
                     *offset += 1;
                 }
-            } else {
-                // Switch from auto-follow to manual, start near bottom
-                if max > 0 {
-                    app.log_scroll_offset = Some(max);
-                }
+            } else if max > 0 {
+                app.log_scroll_offset = Some(max);
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
@@ -239,7 +233,6 @@ fn handle_log_input(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('G') => {
-            // Return to auto-follow
             app.log_scroll_offset = None;
         }
         KeyCode::Char('g') => {
@@ -270,7 +263,6 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             app.namespace_typing = false;
             app.filtered_namespaces
                 .clone_from(&app.available_namespaces);
-            // Pre-select current namespace in the list
             let current_idx = app
                 .filtered_namespaces
                 .iter()
@@ -319,7 +311,6 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Multi-select
         KeyCode::Char(' ') if app.active_tab != ResourceType::Secret => {
             if let Some(i) = app.table_state.selected()
                 && !app.selected_indices.remove(&i)
@@ -335,7 +326,17 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Pod actions
+        KeyCode::Char('f') if app.active_tab == ResourceType::Pod => {
+            app.build_status_filter_items();
+            app.status_filter_state
+                .select(if app.status_filter_items.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
+            app.mode = AppMode::StatusFilter;
+        }
+
         KeyCode::Char('l') if app.active_tab == ResourceType::Pod => {
             if let Some(pod) = app.get_selected_resource() {
                 let name = pod.name().to_owned();
@@ -386,7 +387,6 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Deployment actions
         KeyCode::Char('S') if app.active_tab == ResourceType::Deployment => {
             if app.get_selected_resource().is_some() {
                 app.scale_input.clear();
@@ -405,7 +405,6 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Describe (pods & deployments)
         KeyCode::Char('d')
             if app.active_tab == ResourceType::Pod
                 || app.active_tab == ResourceType::Deployment =>
@@ -449,7 +448,6 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Edit (pods & deployments) — opens in embedded PTY
         KeyCode::Char('e')
             if app.active_tab == ResourceType::Pod
                 || app.active_tab == ResourceType::Deployment =>
@@ -468,7 +466,6 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Secret actions
         KeyCode::Enter | KeyCode::Char('x') if app.active_tab == ResourceType::Secret => {
             app.decode_selected_secret();
             if app.selected_secret_decoded.is_some() {
@@ -480,6 +477,7 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
 
         KeyCode::Esc => {
             app.filter_query.clear();
+            app.status_filter.clear();
             app.update_filter();
         }
         _ => {}
@@ -552,7 +550,6 @@ fn handle_secret_modal_input(app: &mut App, key: KeyEvent) {
 }
 
 fn describe_max_scroll(app: &App) -> usize {
-    // Approximate visible height: 90% of terminal height (matching centered_rect) minus 2 for borders
     let visible = crossterm::terminal::size()
         .map(|(_, h)| ((h as usize) * 90 / 100).saturating_sub(2))
         .unwrap_or(20);
@@ -590,6 +587,72 @@ fn handle_describe_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('g') => {
             app.describe_scroll = 0;
+        }
+        _ => {}
+    }
+}
+
+fn handle_status_filter_input(app: &mut App, key: KeyEvent) {
+    let len = app.status_filter_items.len();
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = AppMode::List;
+        }
+        KeyCode::Enter => {
+            let selected = if app.status_filter_selected.is_empty() {
+                app.status_filter_state
+                    .selected()
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            } else {
+                app.status_filter_selected.clone()
+            };
+            if selected.len() == app.status_filter_items.len() {
+                app.status_filter.clear();
+            } else {
+                app.status_filter = selected
+                    .iter()
+                    .filter_map(|&i| {
+                        app.status_filter_items
+                            .get(i)
+                            .map(|(phase, _)| phase.clone())
+                    })
+                    .collect();
+            }
+            app.update_filter();
+            app.mode = AppMode::List;
+        }
+        KeyCode::Char(' ') => {
+            if let Some(i) = app.status_filter_state.selected()
+                && !app.status_filter_selected.remove(&i)
+            {
+                app.status_filter_selected.insert(i);
+            }
+        }
+        KeyCode::Char('a') => {
+            if app.status_filter_selected.len() == len {
+                app.status_filter_selected.clear();
+            } else {
+                app.status_filter_selected = (0..len).collect();
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let i = app
+                .status_filter_state
+                .selected()
+                .map(|i| i.saturating_sub(1))
+                .unwrap_or(0);
+            app.status_filter_state.select(Some(i));
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if len > 0 {
+                let i = app
+                    .status_filter_state
+                    .selected()
+                    .map(|i| (i + 1).min(len.saturating_sub(1)))
+                    .unwrap_or(0);
+                app.status_filter_state.select(Some(i));
+            }
         }
         _ => {}
     }
@@ -859,8 +922,6 @@ mod tests {
         KubeResource::Pod(Arc::new(pod))
     }
 
-    // --- Navigation ---
-
     #[tokio::test]
     async fn nav_j_moves_down() {
         let mut app = App::new_test();
@@ -910,8 +971,6 @@ mod tests {
         assert_eq!(app.table_state.selected(), None);
     }
 
-    // --- Tab switching ---
-
     #[tokio::test]
     async fn tab_switches_forward() {
         let mut app = App::new_test();
@@ -930,8 +989,6 @@ mod tests {
         handle_input(&mut app, key(KeyCode::BackTab));
         assert_eq!(app.active_tab, ResourceType::Secret);
     }
-
-    // --- Mode transitions ---
 
     #[tokio::test]
     async fn q_quits() {
@@ -972,8 +1029,6 @@ mod tests {
         assert_eq!(app.mode, AppMode::NamespaceSelect);
         assert_eq!(app.popup_state.selected(), Some(0));
     }
-
-    // --- Filter input ---
 
     #[tokio::test]
     async fn filter_input_adds_chars() {
@@ -1017,8 +1072,6 @@ mod tests {
         assert_eq!(app.mode, AppMode::List);
     }
 
-    // --- Popup (context/namespace select) ---
-
     #[tokio::test]
     async fn popup_j_k_navigation() {
         let mut app = App::new_test();
@@ -1054,7 +1107,6 @@ mod tests {
         app.filtered_namespaces = vec![];
         app.popup_state.select(None);
 
-        // Press / to enter typing mode, then type "my-ns"
         handle_input(&mut app, key(KeyCode::Char('/')));
         assert!(app.namespace_typing);
 
@@ -1077,7 +1129,6 @@ mod tests {
         app.available_namespaces = vec!["default".into(), "kube-system".into(), "dev".into()];
         app.filtered_namespaces = vec!["default".into(), "kube-system".into(), "dev".into()];
 
-        // Press / to enter typing mode, then type "de"
         handle_input(&mut app, key(KeyCode::Char('/')));
         handle_input(&mut app, key(KeyCode::Char('d')));
         handle_input(&mut app, key(KeyCode::Char('e')));
@@ -1109,11 +1160,9 @@ mod tests {
         app.filtered_namespaces = vec!["default".into()];
         app.popup_state.select(Some(0));
 
-        // Enter typing mode
         handle_input(&mut app, key(KeyCode::Char('/')));
         assert!(app.namespace_typing);
 
-        // Esc returns to scroll mode, not to List
         handle_input(&mut app, key(KeyCode::Esc));
         assert!(!app.namespace_typing);
         assert_eq!(app.mode, AppMode::NamespaceSelect);
@@ -1140,8 +1189,6 @@ mod tests {
         assert_eq!(app.mode, AppMode::List);
         assert!(app.pending_context.is_none());
     }
-
-    // --- Secret decode modal ---
 
     #[tokio::test]
     async fn secret_enter_opens_decode() {
@@ -1186,15 +1233,12 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Char('j')));
         assert_eq!(app.secret_scroll, 2);
 
-        // Can't go past last
         handle_input(&mut app, key(KeyCode::Char('j')));
         assert_eq!(app.secret_scroll, 2);
 
         handle_input(&mut app, key(KeyCode::Char('k')));
         assert_eq!(app.secret_scroll, 1);
     }
-
-    // --- Log view ---
 
     #[tokio::test]
     async fn log_esc_exits_to_list() {
@@ -1213,8 +1257,6 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Char('q')));
         assert_eq!(app.mode, AppMode::List);
     }
-
-    // --- Scale input ---
 
     #[tokio::test]
     async fn scale_accepts_digits() {
@@ -1256,8 +1298,6 @@ mod tests {
         assert_eq!(app.mode, AppMode::List);
     }
 
-    // --- Confirm dialog ---
-
     #[tokio::test]
     async fn confirm_n_cancels() {
         let mut app = App::new_test();
@@ -1288,8 +1328,6 @@ mod tests {
         assert!(app.pending_action.is_none());
     }
 
-    // --- Pod actions ---
-
     #[tokio::test]
     async fn delete_key_opens_confirm_for_pod() {
         let mut app = App::new_test();
@@ -1309,15 +1347,9 @@ mod tests {
         app.filtered_items = vec![make_pod("nginx")];
         app.table_state.select(Some(0));
 
-        // start_shell will fail in test (no kubectl), but mode should be set
-        // or error reported. We just verify it doesn't panic.
         handle_input(&mut app, key(KeyCode::Char('s')));
-        // In test env, PTY open may fail -> stays in List with error,
-        // or succeeds -> goes to ShellView
         assert!(app.mode == AppMode::ShellView || app.last_error.is_some());
     }
-
-    // --- Deployment actions ---
 
     #[tokio::test]
     async fn shift_s_opens_scale_for_deployment() {
@@ -1332,8 +1364,6 @@ mod tests {
         assert_eq!(app.mode, AppMode::ScaleInput);
     }
 
-    // --- Namespace validation ---
-
     #[tokio::test]
     async fn namespace_rejects_invalid_name() {
         let mut app = App::new_test();
@@ -1342,12 +1372,10 @@ mod tests {
         app.filtered_namespaces = vec![];
         app.popup_state.select(None);
 
-        // Enter typing mode, type invalid namespace with uppercase
         handle_input(&mut app, key(KeyCode::Char('/')));
         handle_input(&mut app, key(KeyCode::Char('M')));
         handle_input(&mut app, key(KeyCode::Char('y')));
         handle_input(&mut app, key(KeyCode::Enter));
-        // Should stay in NamespaceSelect with error
         assert!(app.last_error.is_some());
     }
 
@@ -1367,8 +1395,6 @@ mod tests {
         assert!(app.last_error.is_some());
     }
 
-    // --- Scale validation ---
-
     #[tokio::test]
     async fn scale_rejects_over_1000() {
         let mut app = App::new_test();
@@ -1385,18 +1411,17 @@ mod tests {
         assert!(app.last_error.as_ref().unwrap().contains("1000"));
     }
 
-    // --- Esc in list clears filter ---
-
     #[tokio::test]
     async fn esc_in_list_clears_filter() {
         let mut app = App::new_test();
         app.items = vec![make_pod("a"), make_pod("b")];
         app.filter_query = "a".to_string();
+        app.status_filter.insert("Running".to_string());
         app.update_filter();
-        assert_eq!(app.filtered_items.len(), 1);
 
         handle_input(&mut app, key(KeyCode::Esc));
         assert_eq!(app.filter_query, "");
+        assert!(app.status_filter.is_empty());
         assert_eq!(app.filtered_items.len(), 2);
     }
 
@@ -1425,5 +1450,144 @@ mod tests {
     fn pty_plain_char_no_esc_prefix() {
         let ev = key(KeyCode::Char(':'));
         assert_eq!(key_to_pty_bytes(ev), vec![b':']);
+    }
+
+    fn make_pod_with_status(name: &str, phase: &str) -> KubeResource {
+        use k8s_openapi::api::core::v1::PodStatus;
+        let mut pod = Pod::default();
+        pod.metadata.name = Some(name.to_string());
+        pod.status = Some(PodStatus {
+            phase: Some(phase.to_string()),
+            ..Default::default()
+        });
+        KubeResource::Pod(Arc::new(pod))
+    }
+
+    #[tokio::test]
+    async fn f_opens_status_filter() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_status("a", "Running"),
+            make_pod_with_status("b", "Pending"),
+        ];
+        handle_input(&mut app, key(KeyCode::Char('f')));
+        assert_eq!(app.mode, AppMode::StatusFilter);
+        assert_eq!(app.status_filter_items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn f_ignored_on_deployment_tab() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        handle_input(&mut app, key(KeyCode::Char('f')));
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn status_filter_space_toggles() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_status("a", "Running"),
+            make_pod_with_status("b", "Pending"),
+        ];
+        app.build_status_filter_items();
+        app.status_filter_state.select(Some(0));
+        app.mode = AppMode::StatusFilter;
+
+        handle_input(&mut app, key(KeyCode::Char(' ')));
+        assert!(app.status_filter_selected.contains(&0));
+
+        handle_input(&mut app, key(KeyCode::Char(' ')));
+        assert!(!app.status_filter_selected.contains(&0));
+    }
+
+    #[tokio::test]
+    async fn status_filter_enter_applies() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_status("a", "Running"),
+            make_pod_with_status("b", "Pending"),
+            make_pod_with_status("c", "Running"),
+        ];
+        app.update_filter();
+        assert_eq!(app.filtered_items.len(), 3);
+
+        app.build_status_filter_items();
+        app.status_filter_state.select(Some(0));
+        app.mode = AppMode::StatusFilter;
+
+        let running_idx = app
+            .status_filter_items
+            .iter()
+            .position(|(p, _)| p == "Pending")
+            .unwrap();
+        app.status_filter_selected.insert(running_idx);
+
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, AppMode::List);
+        assert_eq!(app.filtered_items.len(), 1);
+        assert_eq!(app.filtered_items[0].name(), "b");
+    }
+
+    #[tokio::test]
+    async fn status_filter_esc_cancels() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_status("a", "Running"),
+            make_pod_with_status("b", "Pending"),
+        ];
+        app.update_filter();
+        app.build_status_filter_items();
+        app.status_filter_state.select(Some(0));
+        app.status_filter_selected.insert(0);
+        app.mode = AppMode::StatusFilter;
+
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.status_filter.is_empty());
+        assert_eq!(app.filtered_items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn status_filter_a_toggles_all() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_status("a", "Running"),
+            make_pod_with_status("b", "Pending"),
+        ];
+        app.build_status_filter_items();
+        app.status_filter_state.select(Some(0));
+        app.mode = AppMode::StatusFilter;
+
+        handle_input(&mut app, key(KeyCode::Char('a')));
+        assert_eq!(app.status_filter_selected.len(), 2);
+
+        handle_input(&mut app, key(KeyCode::Char('a')));
+        assert!(app.status_filter_selected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_filter_enter_selects_cursor_when_none_toggled() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_status("a", "Running"),
+            make_pod_with_status("b", "Pending"),
+            make_pod_with_status("c", "Running"),
+        ];
+        app.update_filter();
+        app.build_status_filter_items();
+
+        let pending_idx = app
+            .status_filter_items
+            .iter()
+            .position(|(p, _)| p == "Pending")
+            .unwrap();
+        app.status_filter_state.select(Some(pending_idx));
+        app.mode = AppMode::StatusFilter;
+
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, AppMode::List);
+        assert_eq!(app.filtered_items.len(), 1);
+        assert_eq!(app.filtered_items[0].name(), "b");
     }
 }

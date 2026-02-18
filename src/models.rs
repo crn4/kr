@@ -16,6 +16,7 @@ pub enum AppMode {
     Confirm,
     ShellView,
     DescribeView,
+    StatusFilter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

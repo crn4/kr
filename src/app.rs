@@ -30,16 +30,12 @@ pub struct App {
     pub active_tab: ResourceType,
     pub should_quit: bool,
 
-    // Stores
     pub pod_store: Option<Store<Pod>>,
     pub deployment_store: Option<Store<Deployment>>,
     pub secret_store: Option<Store<Secret>>,
-
-    // Contexts
     pub current_context: String,
     pub pending_context: Option<String>,
 
-    // Internal event sender
     pub event_tx: UnboundedSender<KubeResourceEvent>,
 
     pub items: Vec<KubeResource>,
@@ -51,7 +47,7 @@ pub struct App {
     pub selected_secret_decoded: Option<Vec<(String, String)>>,
     pub log_buffer: VecDeque<String>,
     pub log_task: Option<AbortHandle>,
-    pub log_scroll_offset: Option<usize>, // None = auto-follow
+    pub log_scroll_offset: Option<usize>,
 
     pub available_contexts: Vec<String>,
     pub available_namespaces: Vec<String>,
@@ -67,28 +63,26 @@ pub struct App {
     pub loading_since: Option<Instant>,
     pub dirty: bool,
 
-    // Secret modal scroll
     pub secret_scroll: usize,
     pub secret_table_state: TableState,
     pub secret_revealed: bool,
 
-    // Scale input
     pub scale_input: String,
 
-    // Confirmation dialog
     pub pending_action: Option<PendingAction>,
 
-    // Describe view
     pub describe_content: Vec<String>,
     pub describe_scroll: usize,
 
-    // Embedded shell session
     pub shell_session: Option<ShellSession>,
 
-    // Clipboard auto-clear task
     pub clipboard_clear_task: Option<AbortHandle>,
 
-    // Persistent state
+    pub status_filter: HashSet<String>,
+    pub status_filter_items: Vec<(String, usize)>,
+    pub status_filter_selected: HashSet<usize>,
+    pub status_filter_state: ListState,
+
     pub app_state: AppState,
 }
 
@@ -123,7 +117,7 @@ impl App {
                 log_buffer: VecDeque::new(),
                 log_task: None,
                 log_scroll_offset: None,
-                current_context: "default".into(), // Will be updated
+                current_context: "default".into(),
                 pending_context: None,
                 available_contexts: Vec::new(),
                 available_namespaces: Vec::new(),
@@ -146,6 +140,10 @@ impl App {
                 describe_scroll: 0,
                 shell_session: None,
                 clipboard_clear_task: None,
+                status_filter: HashSet::new(),
+                status_filter_items: Vec::new(),
+                status_filter_selected: HashSet::new(),
+                status_filter_state: ListState::default(),
                 app_state: AppState::load(),
             },
             rx,
@@ -175,6 +173,7 @@ impl App {
         self.filtered_items.clear();
         self.table_state.select(None);
         self.selected_indices.clear();
+        self.status_filter.clear();
     }
 
     pub fn get_selected_resource(&self) -> Option<&KubeResource> {
@@ -228,7 +227,6 @@ impl App {
         let ctx = self.current_context.clone();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            // Try kube-rs API first
             use k8s_openapi::api::core::v1::Namespace;
             use kube::Api;
             use kube::api::ListParams;
@@ -479,7 +477,6 @@ impl App {
         use bytes::Bytes;
         use tower::ServiceBuilder;
 
-        // Create a mock kube::Client that returns empty response
         let mock_service = tower::service_fn(|_req: http::Request<kube::client::Body>| async {
             Ok::<_, std::convert::Infallible>(http::Response::builder()
                 .status(200)
@@ -531,20 +528,63 @@ impl App {
             describe_scroll: 0,
             shell_session: None,
             clipboard_clear_task: None,
+            status_filter: HashSet::new(),
+            status_filter_items: Vec::new(),
+            status_filter_selected: HashSet::new(),
+            status_filter_state: ListState::default(),
             app_state: AppState::default(),
         }
     }
 
+    pub fn pod_phase(p: &Pod) -> &str {
+        p.status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .unwrap_or("Unknown")
+    }
+
+    pub fn build_status_filter_items(&mut self) {
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for item in &self.items {
+            if let KubeResource::Pod(p) = item {
+                *counts.entry(Self::pod_phase(p).to_owned()).or_default() += 1;
+            }
+        }
+        self.status_filter_items = counts.into_iter().collect();
+        self.status_filter_selected = self
+            .status_filter_items
+            .iter()
+            .enumerate()
+            .filter(|(_, (phase, _))| self.status_filter.contains(phase))
+            .map(|(i, _)| i)
+            .collect();
+    }
+
     pub fn update_filter(&mut self) {
         self.selected_indices.clear();
-        if self.filter_query.is_empty() {
+        let has_status = self.active_tab == ResourceType::Pod && !self.status_filter.is_empty();
+        let has_query = !self.filter_query.is_empty();
+
+        if !has_status && !has_query {
             self.filtered_items.clone_from(&self.items);
         } else {
             let query = self.filter_query.to_lowercase();
             self.filtered_items = self
                 .items
                 .iter()
-                .filter(|item| item.name().to_lowercase().contains(&query))
+                .filter(|item| {
+                    if has_status
+                        && let KubeResource::Pod(p) = item
+                        && !self.status_filter.contains(Self::pod_phase(p))
+                    {
+                        return false;
+                    }
+                    if has_query {
+                        return item.name().to_lowercase().contains(&query);
+                    }
+                    true
+                })
                 .cloned()
                 .collect();
         }
@@ -575,8 +615,6 @@ mod tests {
         secret.data = Some(map);
         KubeResource::Secret(Arc::new(secret))
     }
-
-    // --- Tab cycling ---
 
     #[tokio::test]
     async fn next_tab_cycles_forward() {
@@ -615,8 +653,6 @@ mod tests {
         assert!(app.filtered_items.is_empty());
         assert_eq!(app.table_state.selected(), None);
     }
-
-    // --- Filter ---
 
     #[tokio::test]
     async fn filter_empty_returns_all_items() {
@@ -665,8 +701,6 @@ mod tests {
         assert!(app.filtered_items.is_empty());
     }
 
-    // --- Log buffer ---
-
     #[tokio::test]
     async fn push_log_line_appends() {
         let mut app = App::new_test();
@@ -686,11 +720,8 @@ mod tests {
         }
 
         assert_eq!(app.log_buffer.len(), MAX_LOG_LINES);
-        // First line should be line100 (first 100 were evicted)
         assert_eq!(app.log_buffer[0], "line100");
     }
-
-    // --- Selection ---
 
     #[tokio::test]
     async fn get_selected_resource_returns_none_when_no_selection() {
@@ -712,12 +743,10 @@ mod tests {
     async fn get_selected_resource_out_of_bounds() {
         let mut app = App::new_test();
         app.filtered_items = vec![make_pod("a")];
-        app.table_state.select(Some(5)); // out of bounds
+        app.table_state.select(Some(5));
 
         assert!(app.get_selected_resource().is_none());
     }
-
-    // --- Secret decode ---
 
     #[tokio::test]
     async fn decode_selected_secret_extracts_data() {
@@ -733,7 +762,6 @@ mod tests {
 
         let decoded = app.selected_secret_decoded.unwrap();
         assert_eq!(decoded.len(), 2);
-        // BTreeMap is sorted by key
         assert!(decoded.iter().any(|(k, v)| k == "user" && v == "admin"));
         assert!(decoded.iter().any(|(k, v)| k == "pass" && v == "s3cret"));
     }
@@ -765,17 +793,12 @@ mod tests {
         assert!(app.selected_secret_decoded.is_none());
     }
 
-    // --- Abort log stream ---
-
     #[tokio::test]
     async fn abort_log_stream_clears_handle() {
         let mut app = App::new_test();
-        // No task — should not panic
         app.abort_log_stream();
         assert!(app.log_task.is_none());
     }
-
-    // --- Dirty flag ---
 
     #[tokio::test]
     async fn new_app_starts_dirty() {

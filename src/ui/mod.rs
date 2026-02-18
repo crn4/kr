@@ -8,11 +8,11 @@ use crate::ui::components::centered_fixed_rect;
 use crate::ui::theme::*;
 use crate::ui::views::*;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Tabs},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -29,10 +29,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_main(f, app, chunks[1]);
     draw_footer(f, app, chunks[2]);
 
-    // Overlays
     match app.mode {
         AppMode::SecretDecode => secrets_view::draw_decode_modal(f, app),
-        AppMode::ContextSelect | AppMode::NamespaceSelect => popup_view::draw_popup(f, app),
+        AppMode::ContextSelect | AppMode::NamespaceSelect | AppMode::StatusFilter => {
+            popup_view::draw_popup(f, app)
+        }
         AppMode::ScaleInput => draw_scale_input(f, app),
         AppMode::Confirm => draw_confirm(f, app),
         AppMode::ShellView => shell_view::draw(f, app),
@@ -63,18 +64,29 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         });
     f.render_widget(tabs, chunks[0]);
 
+    let filter_part = if app.filter_query.is_empty() {
+        String::new()
+    } else if app.mode == AppMode::FilterInput {
+        format!(" | Filter: {}_", app.filter_query)
+    } else {
+        format!(" | Filter: {}", app.filter_query)
+    };
+
+    let status_part = if app.status_filter.is_empty() {
+        String::new()
+    } else {
+        let mut statuses: Vec<&str> = app.status_filter.iter().map(|s| s.as_str()).collect();
+        statuses.sort_unstable();
+        format!(" | Status: {}", statuses.join(", "))
+    };
+
     let info_text = format!(
-        " Ctx: {} | NS: {} | Items: {}{}",
+        " Ctx: {} | NS: {} | Items: {}{}{}",
         app.current_context,
         app.current_namespace,
         app.filtered_items.len(),
-        if app.filter_query.is_empty() {
-            String::new()
-        } else if app.mode == AppMode::FilterInput {
-            format!(" | Filter: {}_", app.filter_query)
-        } else {
-            format!(" | Filter: {}", app.filter_query)
-        },
+        filter_part,
+        status_part,
     );
     let info = Paragraph::new(info_text).style(STYLE_NORMAL);
     f.render_widget(info, chunks[1]);
@@ -133,7 +145,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let help = match app.mode {
         AppMode::List => match app.active_tab {
             ResourceType::Pod => {
-                "q:Quit /:Filter j/k:Nav g/G:Top/End PgUp/PgDn Space:Sel ^a:All Tab:Next l:Logs s:Shell D:Del d:Desc e:Edit c:Ctx n:NS"
+                "q:Quit /:Filter f:Status j/k:Nav g/G:Top/End Space:Sel ^a:All Tab:Next l:Logs s:Shell D:Del d:Desc e:Edit c:Ctx n:NS"
             }
             ResourceType::Deployment => {
                 "q:Quit /:Filter j/k:Nav g/G:Top/End PgUp/PgDn Space:Sel ^a:All Tab:Next S:Scale r:Restart D:Del d:Desc e:Edit c:Ctx n:NS"
@@ -149,12 +161,15 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Confirm => "y:Confirm | n/Esc:Cancel",
         AppMode::DescribeView => "j/k:Scroll | PgUp/PgDn | g/G:Top/Bottom | q/Esc:Close",
         AppMode::ShellView => "Ctrl+Q:Close shell",
+        AppMode::StatusFilter => "j/k:Nav | Space:Toggle | a:All | Enter:Apply | Esc:Cancel",
         AppMode::ContextSelect => "j/k:Nav | Enter:Select | Esc:Cancel",
-        AppMode::NamespaceSelect => if app.namespace_typing {
-            "Type namespace | Up/Down:Nav | Enter:Select | Esc:Back"
-        } else {
-            "j/k:Nav | /:Search | Enter:Select | Esc:Cancel"
-        },
+        AppMode::NamespaceSelect => {
+            if app.namespace_typing {
+                "Type namespace | Up/Down:Nav | Enter:Select | Esc:Back"
+            } else {
+                "j/k:Nav | /:Search | Enter:Select | Esc:Cancel"
+            }
+        }
     };
     let p = Paragraph::new(help).style(STYLE_NORMAL);
     f.render_widget(p, area);
