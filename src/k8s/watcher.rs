@@ -1,8 +1,8 @@
 use futures::Stream;
 use kube::{
+    Client,
     api::{Api, Resource},
     runtime::{reflector, reflector::Store, watcher},
-    Client,
 };
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;

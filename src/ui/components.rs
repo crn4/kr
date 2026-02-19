@@ -36,12 +36,10 @@ mod tests {
     fn centered_rect_50_50() {
         let parent = Rect::new(0, 0, 100, 100);
         let r = centered_rect(50, 50, parent);
-        // Should be roughly centered with 50% size
         assert!(r.width > 0);
         assert!(r.height > 0);
         assert!(r.x > 0);
         assert!(r.y > 0);
-        // Center should be approximately at parent center
         let cx = r.x + r.width / 2;
         let cy = r.y + r.height / 2;
         assert!((cx as i32 - 50).abs() <= 2);

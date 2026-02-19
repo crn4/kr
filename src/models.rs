@@ -78,7 +78,11 @@ impl PendingAction {
         match self {
             Self::DeleteResource { count, kind, names } => {
                 if *count == 1 {
-                    format!("Delete {} '{}'?", kind, names.first().map(|s| s.as_str()).unwrap_or("?"))
+                    format!(
+                        "Delete {} '{}'?",
+                        kind,
+                        names.first().map(|s| s.as_str()).unwrap_or("?")
+                    )
                 } else {
                     format!("Delete {} {}?\n{}", count, kind, names.join(", "))
                 }

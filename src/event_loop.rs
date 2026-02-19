@@ -18,9 +18,9 @@ fn is_forbidden(err: &watcher::Error) -> bool {
         watcher::Error::InitialListFailed(e)
         | watcher::Error::WatchStartFailed(e)
         | watcher::Error::WatchFailed(e) => {
-            matches!(e, kube::Error::Api(resp) if resp.code == 403)
+            matches!(e, kube::Error::Api(resp) if resp.is_forbidden())
         }
-        watcher::Error::WatchError(resp) => resp.code == 403,
+        watcher::Error::WatchError(resp) => resp.is_forbidden(),
         _ => false,
     }
 }
@@ -146,7 +146,7 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
     app.dirty = true;
 }
 
-pub async fn run<B: Backend + std::io::Write>(
+pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
     terminal: &mut Terminal<B>,
     mut app: App,
     mut event_rx: tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
@@ -290,54 +290,54 @@ pub async fn run<B: Backend + std::io::Write>(
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
-    use kube::core::ErrorResponse;
+    use kube::core::Status;
 
-    fn make_403_response() -> ErrorResponse {
-        ErrorResponse {
-            status: "Failure".to_string(),
+    fn make_403_status() -> Box<Status> {
+        Box::new(Status {
             message: "secrets is forbidden: User \"test\" cannot list resource \"secrets\""
                 .to_string(),
             reason: "Forbidden".to_string(),
             code: 403,
-        }
+            ..Default::default()
+        })
     }
 
-    fn make_404_response() -> ErrorResponse {
-        ErrorResponse {
-            status: "Failure".to_string(),
+    fn make_404_status() -> Box<Status> {
+        Box::new(Status {
             message: "not found".to_string(),
             reason: "NotFound".to_string(),
             code: 404,
-        }
+            ..Default::default()
+        })
     }
 
     #[test]
     fn is_forbidden_detects_initial_list_403() {
-        let err = watcher::Error::InitialListFailed(kube::Error::Api(make_403_response()));
+        let err = watcher::Error::InitialListFailed(kube::Error::Api(make_403_status()));
         assert!(is_forbidden(&err));
     }
 
     #[test]
     fn is_forbidden_detects_watch_start_403() {
-        let err = watcher::Error::WatchStartFailed(kube::Error::Api(make_403_response()));
+        let err = watcher::Error::WatchStartFailed(kube::Error::Api(make_403_status()));
         assert!(is_forbidden(&err));
     }
 
     #[test]
     fn is_forbidden_detects_watch_error_403() {
-        let err = watcher::Error::WatchError(make_403_response());
+        let err = watcher::Error::WatchError(make_403_status());
         assert!(is_forbidden(&err));
     }
 
     #[test]
     fn is_forbidden_detects_watch_failed_403() {
-        let err = watcher::Error::WatchFailed(kube::Error::Api(make_403_response()));
+        let err = watcher::Error::WatchFailed(kube::Error::Api(make_403_status()));
         assert!(is_forbidden(&err));
     }
 
     #[test]
     fn is_forbidden_ignores_404() {
-        let err = watcher::Error::InitialListFailed(kube::Error::Api(make_404_response()));
+        let err = watcher::Error::InitialListFailed(kube::Error::Api(make_404_status()));
         assert!(!is_forbidden(&err));
     }
 
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn map_watcher_event_403_returns_forbidden() {
-        let err = watcher::Error::InitialListFailed(kube::Error::Api(make_403_response()));
+        let err = watcher::Error::InitialListFailed(kube::Error::Api(make_403_status()));
         let event = map_watcher_event::<Pod>(Err(err));
         assert!(
             matches!(event, KubeResourceEvent::WatcherForbidden(msg) if msg.contains("forbidden"))
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn map_watcher_event_404_returns_error() {
-        let err = watcher::Error::InitialListFailed(kube::Error::Api(make_404_response()));
+        let err = watcher::Error::InitialListFailed(kube::Error::Api(make_404_status()));
         let event = map_watcher_event::<Pod>(Err(err));
         assert!(matches!(event, KubeResourceEvent::Error(_)));
     }

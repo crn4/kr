@@ -11,10 +11,10 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-kube = { version = "0.96", features = ["runtime", "derive", "client"] }
-k8s-openapi = { version = "0.23", features = ["latest"] }
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+kube = { version = "3", features = ["runtime", "derive", "client"] }
+k8s-openapi = { version = "0.27", features = ["latest"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
 clap = { version = "4", features = ["derive"] }
 arboard = "3"
 anyhow = "1"
@@ -23,11 +23,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
-chrono = "0.4"
-dirs = "5"
+jiff = "0.2"
+dirs = "6"
 shlex = "1"
 portable-pty = "0.9"
-vt100 = "0.15"
+vt100 = "0.16"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

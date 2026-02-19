@@ -2,9 +2,9 @@ use crate::app::App;
 use crate::ui::components::centered_rect;
 use crate::ui::theme::*;
 use ratatui::{
+    Frame,
     text::Line,
     widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -18,10 +18,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let scroll = (app.describe_scroll as u16).min(total_lines.saturating_sub(visible_height));
 
-    let title = format!(
-        "Describe [{} lines]",
-        app.describe_content.len(),
-    );
+    let title = format!("Describe [{} lines]", app.describe_content.len(),);
 
     let paragraph = Paragraph::new(lines)
         .block(

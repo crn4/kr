@@ -1,8 +1,8 @@
 use anyhow::Result;
 use futures::{AsyncBufReadExt, StreamExt};
 use k8s_openapi::api::{apps::v1::Deployment, core::v1::Pod};
-use kube::api::{Api, LogParams};
 use kube::Client;
+use kube::api::{Api, LogParams};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::models::KubeResourceEvent;
@@ -33,7 +33,10 @@ pub fn stream_pod_logs(
                 }
             }
             Err(e) => {
-                if tx.send(KubeResourceEvent::Error(format!("Log error: {e}"))).is_err() {
+                if tx
+                    .send(KubeResourceEvent::Error(format!("Log error: {e}")))
+                    .is_err()
+                {
                     tracing::warn!("Failed to send log error event");
                 }
             }
@@ -65,14 +68,18 @@ pub async fn scale_deployment(
         "spec": { "replicas": replicas }
     });
     deployments
-        .patch(name, &kube::api::PatchParams::apply("kr"), &kube::api::Patch::Merge(&patch))
+        .patch(
+            name,
+            &kube::api::PatchParams::apply("kr"),
+            &kube::api::Patch::Merge(&patch),
+        )
         .await?;
     Ok(())
 }
 
 pub async fn rollout_restart(client: Client, namespace: &str, name: &str) -> Result<()> {
     let deployments: Api<Deployment> = Api::namespaced(client, namespace);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = jiff::Timestamp::now().to_string();
     let patch = serde_json::json!({
         "spec": {
             "template": {
@@ -85,7 +92,11 @@ pub async fn rollout_restart(client: Client, namespace: &str, name: &str) -> Res
         }
     });
     deployments
-        .patch(name, &kube::api::PatchParams::apply("kr"), &kube::api::Patch::Merge(&patch))
+        .patch(
+            name,
+            &kube::api::PatchParams::apply("kr"),
+            &kube::api::Patch::Merge(&patch),
+        )
         .await?;
     Ok(())
 }

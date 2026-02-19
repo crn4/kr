@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AppState {
-    /// Per-context list of known namespaces
     #[serde(default)]
     pub namespaces: HashMap<String, Vec<String>>,
 }
@@ -40,16 +39,13 @@ impl AppState {
                         );
                     }
                 }
-                // Atomic write: write to tmp, then rename
                 let tmp = path.with_extension("tmp");
                 if std::fs::write(&tmp, &json).is_ok() {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(
-                            &tmp,
-                            std::fs::Permissions::from_mode(0o600),
-                        );
+                        let _ =
+                            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
                     }
                     let _ = std::fs::rename(&tmp, &path);
                 }
@@ -57,12 +53,10 @@ impl AppState {
         }
     }
 
-    /// Get saved namespaces for a context
     pub fn get_namespaces(&self, context: &str) -> Vec<String> {
         self.namespaces.get(context).cloned().unwrap_or_default()
     }
 
-    /// Add a namespace to the context's list (deduplicates, keeps sorted)
     pub fn add_namespace(&mut self, context: &str, namespace: &str) {
         let entry = self.namespaces.entry(context.to_string()).or_default();
         if !entry.contains(&namespace.to_string()) {
@@ -71,7 +65,6 @@ impl AppState {
         }
     }
 
-    /// Merge API-discovered namespaces with saved ones
     pub fn merge_namespaces(&mut self, context: &str, discovered: &[String]) -> Vec<String> {
         let entry = self.namespaces.entry(context.to_string()).or_default();
         for ns in discovered {
@@ -93,7 +86,7 @@ mod tests {
         let mut state = AppState::default();
         state.add_namespace("ctx1", "ns-a");
         state.add_namespace("ctx1", "ns-b");
-        state.add_namespace("ctx1", "ns-a"); // duplicate
+        state.add_namespace("ctx1", "ns-a");
         assert_eq!(state.get_namespaces("ctx1"), vec!["ns-a", "ns-b"]);
     }
 

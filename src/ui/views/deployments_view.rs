@@ -2,10 +2,10 @@ use crate::app::App;
 use crate::models::KubeResource;
 use crate::ui::theme::*;
 use ratatui::{
+    Frame,
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
@@ -30,10 +30,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let KubeResource::Deployment(d) = item else {
-                return Row::new(vec![
-                    Cell::from(marker),
-                    Cell::from(item.name().to_owned()),
-                ]);
+                return Row::new(vec![Cell::from(marker), Cell::from(item.name().to_owned())]);
             };
 
             let name = d.metadata.name.as_deref().unwrap_or_default();
@@ -88,7 +85,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.filtered_items.is_empty() && !app.is_loading {
         let msg = if app.last_error.is_some() {
-            "" // error shown in footer
+            ""
         } else if app.filter_query.is_empty() {
             "No deployments in this namespace"
         } else {

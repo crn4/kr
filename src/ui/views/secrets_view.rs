@@ -3,10 +3,10 @@ use crate::models::KubeResource;
 use crate::ui::components::centered_rect;
 use crate::ui::theme::*;
 use ratatui::{
+    Frame,
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     widgets::{Block, Borders, Cell, Clear, HighlightSpacing, Row, Table},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {

@@ -2,10 +2,10 @@ use crate::app::App;
 use crate::ui::components::centered_rect;
 use crate::ui::theme::*;
 use ratatui::{
+    Frame,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -48,12 +48,11 @@ pub fn draw(f: &mut Frame, app: &App) {
                     if text.is_empty() {
                         (" ".to_owned(), s)
                     } else {
-                        (text, s)
+                        (text.to_owned(), s)
                     }
                 }
                 None => (" ".to_owned(), Style::default()),
             };
-            // Draw cursor
             let style = if row == cursor.0 && col == cursor.1 {
                 style.add_modifier(Modifier::REVERSED)
             } else {

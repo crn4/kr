@@ -2,12 +2,11 @@ use anyhow::Result;
 use clap::Parser;
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 
-/// RAII guard that restores terminal state on drop (panic, early return, etc.)
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
@@ -30,17 +29,16 @@ pub mod utils;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Run as a one-off CLI command
     #[arg(short, long)]
     command: Option<String>,
 }
 
 fn init_tracing(to_file: bool) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("kr=info,kube=warn,hyper=warn,tower=warn,h2=warn"));
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("kr=info,kube=warn,hyper=warn,tower=warn,h2=warn")
+    });
 
     if to_file {
-        // TUI mode: write logs to file to avoid corrupting the terminal
         let log_dir = dirs::config_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("kr");
@@ -59,7 +57,6 @@ fn init_tracing(to_file: bool) {
         }
     }
 
-    // CLI mode (or file open failed): write to stderr
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
@@ -70,7 +67,6 @@ async fn main() -> Result<()> {
     if let Some(cmd) = args.command {
         init_tracing(false);
 
-        // CLI Mode — parse with shlex for proper quoting support
         let args_vec = match shlex::split(&cmd) {
             Some(args) => args,
             None => {
@@ -95,15 +91,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // TUI Mode — logs go to ~/.config/kr/kr.log
     init_tracing(true);
 
-    // Create kube client BEFORE entering TUI so exec auth plugins
-    // (e.g. Teleport tsh) can interact with the terminal for SSO/MFA.
     eprintln!("Connecting to cluster...");
     let client = k8s::client::default_client().await?;
 
-    // Install panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -113,14 +105,13 @@ async fn main() -> Result<()> {
     }));
 
     enable_raw_mode()?;
-    let _guard = TerminalGuard; // restores terminal on any exit path
+    let _guard = TerminalGuard;
 
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Initialize App and Run Event Loop
     let (app, event_rx) = app::App::new(client).await?;
     event_loop::run(&mut terminal, app, event_rx).await?;
 

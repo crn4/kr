@@ -2,10 +2,10 @@ use crate::app::App;
 use crate::models::KubeResource;
 use crate::ui::theme::*;
 use ratatui::{
+    Frame,
     layout::{Constraint, Rect},
     style::Style,
     widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
@@ -29,11 +29,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let KubeResource::Pod(p) = item else {
-                return Row::new(vec![
-                    Cell::from(marker),
-                    Cell::from(item.name().to_owned()),
-                ])
-                .height(1);
+                return Row::new(vec![Cell::from(marker), Cell::from(item.name().to_owned())])
+                    .height(1);
             };
 
             let name = p.metadata.name.as_deref().unwrap_or_default();
