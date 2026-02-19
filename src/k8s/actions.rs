@@ -12,6 +12,7 @@ pub fn stream_pod_logs(
     namespace: &str,
     pod_name: &str,
     tx: UnboundedSender<KubeResourceEvent>,
+    tail_lines: i64,
 ) -> tokio::task::AbortHandle {
     let namespace = namespace.to_owned();
     let pod_name = pod_name.to_owned();
@@ -19,7 +20,7 @@ pub fn stream_pod_logs(
         let pods: Api<Pod> = Api::namespaced(client, &namespace);
         let lp = LogParams {
             follow: true,
-            tail_lines: Some(100),
+            tail_lines: Some(tail_lines),
             ..Default::default()
         };
 
@@ -99,4 +100,38 @@ pub async fn rollout_restart(client: Client, namespace: &str, name: &str) -> Res
         )
         .await?;
     Ok(())
+}
+
+pub fn fetch_log_history(
+    client: Client,
+    namespace: &str,
+    pod_name: &str,
+    tail_lines: i64,
+    generation: u64,
+    tx: UnboundedSender<KubeResourceEvent>,
+) -> tokio::task::AbortHandle {
+    let namespace = namespace.to_owned();
+    let pod_name = pod_name.to_owned();
+    let handle = tokio::spawn(async move {
+        let pods: Api<Pod> = Api::namespaced(client, &namespace);
+        let lp = LogParams {
+            follow: false,
+            tail_lines: Some(tail_lines),
+            ..Default::default()
+        };
+        match pods.log_stream(&pod_name, &lp).await {
+            Ok(stream) => {
+                let mut lines = Vec::new();
+                let mut reader = stream.lines();
+                while let Some(Ok(line)) = reader.next().await {
+                    lines.push(line);
+                }
+                let _ = tx.send(KubeResourceEvent::LogHistory(generation, lines));
+            }
+            Err(e) => {
+                let _ = tx.send(KubeResourceEvent::Error(format!("Log history error: {e}")));
+            }
+        }
+    });
+    handle.abort_handle()
 }

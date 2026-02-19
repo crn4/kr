@@ -206,7 +206,11 @@ fn handle_log_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('k') | KeyCode::Up => {
             if let Some(offset) = &mut app.log_scroll_offset {
-                *offset = offset.saturating_sub(1);
+                if *offset > 0 {
+                    *offset -= 1;
+                } else {
+                    app.load_more_history();
+                }
             } else {
                 let max = log_max_scroll(app);
                 if max > 0 {
@@ -224,7 +228,11 @@ fn handle_log_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::PageUp => {
             if let Some(offset) = &mut app.log_scroll_offset {
-                *offset = offset.saturating_sub(page_size);
+                if *offset == 0 {
+                    app.load_more_history();
+                } else {
+                    *offset = offset.saturating_sub(page_size);
+                }
             } else {
                 let max = log_max_scroll(app);
                 if max > 0 {
@@ -1256,6 +1264,52 @@ mod tests {
 
         handle_input(&mut app, key(KeyCode::Char('q')));
         assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn log_scroll_up_at_top_triggers_load_more() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_pod_name = "test-pod".into();
+        app.log_namespace = "default".into();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(0);
+
+        handle_input(&mut app, key(KeyCode::Char('k')));
+        assert!(app.log_loading_history);
+        assert_eq!(app.log_tail_lines, 200);
+    }
+
+    #[tokio::test]
+    async fn log_load_more_skips_when_already_loading() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_pod_name = "test-pod".into();
+        app.log_namespace = "default".into();
+        app.log_loading_history = true;
+        app.log_tail_lines = 200;
+        app.log_scroll_offset = Some(0);
+
+        handle_input(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.log_tail_lines, 200);
+    }
+
+    #[tokio::test]
+    async fn log_pageup_at_top_triggers_load_more() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_pod_name = "test-pod".into();
+        app.log_namespace = "default".into();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(0);
+
+        handle_input(&mut app, key(KeyCode::PageUp));
+        assert!(app.log_loading_history);
+        assert_eq!(app.log_tail_lines, 200);
     }
 
     #[tokio::test]

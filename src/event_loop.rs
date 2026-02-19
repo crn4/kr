@@ -114,6 +114,9 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         KubeResourceEvent::Log(line) => {
             app.push_log_line(line);
         }
+        KubeResourceEvent::LogHistory(generation, lines) => {
+            app.merge_log_history(generation, lines);
+        }
         KubeResourceEvent::Error(e) => {
             app.set_error(e);
         }

@@ -51,6 +51,7 @@ pub enum KubeResourceEvent {
     Success(String),
     WatcherForbidden(String),
     Log(String),
+    LogHistory(u64, Vec<String>),
     ShellOutput(Vec<u8>),
     ShellExited,
     DescribeReady(Vec<String>),

@@ -20,7 +20,7 @@ pub struct ShellSession {
     _master: Box<dyn portable_pty::MasterPty + Send>,
 }
 
-const MAX_LOG_LINES: usize = 10_000;
+pub(crate) const MAX_LOG_LINES: usize = 10_000;
 
 pub struct App {
     pub client: Client,
@@ -77,6 +77,14 @@ pub struct App {
     pub shell_session: Option<ShellSession>,
 
     pub clipboard_clear_task: Option<AbortHandle>,
+
+    pub log_pod_name: String,
+    pub log_namespace: String,
+    pub log_tail_lines: i64,
+    pub log_loading_history: bool,
+    pub log_generation: u64,
+    pub log_history_exhausted: bool,
+    pub log_history_task: Option<AbortHandle>,
 
     pub status_filter: HashSet<String>,
     pub status_filter_items: Vec<(String, usize)>,
@@ -140,6 +148,13 @@ impl App {
                 describe_scroll: 0,
                 shell_session: None,
                 clipboard_clear_task: None,
+                log_pod_name: String::new(),
+                log_namespace: String::new(),
+                log_tail_lines: 100,
+                log_loading_history: false,
+                log_generation: 0,
+                log_history_exhausted: false,
+                log_history_task: None,
                 status_filter: HashSet::new(),
                 status_filter_items: Vec::new(),
                 status_filter_selected: HashSet::new(),
@@ -204,6 +219,12 @@ impl App {
         self.abort_log_stream();
         self.log_buffer.clear();
         self.log_scroll_offset = None;
+        self.log_tail_lines = 100;
+        self.log_loading_history = false;
+        self.log_generation += 1;
+        self.log_history_exhausted = false;
+        self.log_pod_name = pod_name.to_owned();
+        self.log_namespace = namespace.to_owned();
         self.mode = AppMode::LogView;
 
         let abort = crate::k8s::actions::stream_pod_logs(
@@ -211,12 +232,74 @@ impl App {
             namespace,
             pod_name,
             self.event_tx.clone(),
+            self.log_tail_lines,
         );
         self.log_task = Some(abort);
     }
 
+    pub fn load_more_history(&mut self) {
+        if self.log_loading_history || self.log_history_exhausted {
+            return;
+        }
+        if self.log_tail_lines >= MAX_LOG_LINES as i64 {
+            self.log_history_exhausted = true;
+            return;
+        }
+        self.log_loading_history = true;
+        self.log_tail_lines += 100;
+        let handle = crate::k8s::actions::fetch_log_history(
+            self.client.clone(),
+            &self.log_namespace,
+            &self.log_pod_name,
+            self.log_tail_lines,
+            self.log_generation,
+            self.event_tx.clone(),
+        );
+        self.log_history_task = Some(handle);
+    }
+
+    pub fn merge_log_history(&mut self, generation: u64, lines: Vec<String>) {
+        if generation != self.log_generation {
+            self.log_loading_history = false;
+            return;
+        }
+
+        if lines.len() < self.log_tail_lines as usize {
+            self.log_history_exhausted = true;
+        }
+
+        let overlap_idx = self
+            .log_buffer
+            .front()
+            .and_then(|first| lines.iter().rposition(|l| l == first))
+            .unwrap_or(lines.len());
+
+        let available = MAX_LOG_LINES.saturating_sub(self.log_buffer.len());
+        let prepend_count = overlap_idx.min(available);
+
+        if prepend_count == 0 {
+            self.log_history_exhausted = true;
+            self.log_loading_history = false;
+            return;
+        }
+
+        let start = overlap_idx - prepend_count;
+        for line in lines[start..overlap_idx].iter().rev() {
+            self.log_buffer.push_front(line.clone());
+        }
+
+        if let Some(offset) = &mut self.log_scroll_offset {
+            *offset += prepend_count;
+        }
+
+        self.log_loading_history = false;
+    }
+
     pub fn abort_log_stream(&mut self) {
         if let Some(handle) = self.log_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.log_history_task.take() {
             handle.abort();
         }
     }
@@ -433,6 +516,9 @@ impl App {
     pub fn push_log_line(&mut self, line: String) {
         if self.log_buffer.len() >= MAX_LOG_LINES {
             self.log_buffer.pop_front();
+            if let Some(offset) = &mut self.log_scroll_offset {
+                *offset = offset.saturating_sub(1);
+            }
         }
         self.log_buffer.push_back(line);
     }
@@ -528,6 +614,13 @@ impl App {
             describe_scroll: 0,
             shell_session: None,
             clipboard_clear_task: None,
+            log_pod_name: String::new(),
+            log_namespace: String::new(),
+            log_tail_lines: 100,
+            log_loading_history: false,
+            log_generation: 0,
+            log_history_exhausted: false,
+            log_history_task: None,
             status_filter: HashSet::new(),
             status_filter_items: Vec::new(),
             status_filter_selected: HashSet::new(),
@@ -804,5 +897,121 @@ mod tests {
     async fn new_app_starts_dirty() {
         let app = App::new_test();
         assert!(app.dirty);
+    }
+
+    #[tokio::test]
+    async fn merge_log_history_prepends_new_lines() {
+        let mut app = App::new_test();
+        app.log_generation = 1;
+        app.log_tail_lines = 200;
+        for line in ["line3", "line4", "line5"] {
+            app.log_buffer.push_back(line.to_string());
+        }
+        app.log_scroll_offset = Some(0);
+        app.log_loading_history = true;
+
+        let history = vec![
+            "line1".into(),
+            "line2".into(),
+            "line3".into(),
+            "line4".into(),
+            "line5".into(),
+        ];
+        app.merge_log_history(1, history);
+
+        assert_eq!(app.log_buffer.len(), 5);
+        assert_eq!(app.log_buffer[0], "line1");
+        assert_eq!(app.log_buffer[1], "line2");
+        assert_eq!(app.log_buffer[2], "line3");
+        assert_eq!(app.log_scroll_offset, Some(2));
+        assert!(!app.log_loading_history);
+    }
+
+    #[tokio::test]
+    async fn merge_log_history_discards_wrong_generation() {
+        let mut app = App::new_test();
+        app.log_generation = 2;
+        app.log_buffer.push_back("current".into());
+        app.log_loading_history = true;
+
+        app.merge_log_history(1, vec!["old".into(), "current".into()]);
+
+        assert_eq!(app.log_buffer.len(), 1);
+        assert_eq!(app.log_buffer[0], "current");
+        assert!(!app.log_loading_history);
+    }
+
+    #[tokio::test]
+    async fn merge_log_history_detects_exhaustion() {
+        let mut app = App::new_test();
+        app.log_generation = 1;
+        app.log_tail_lines = 200;
+        app.log_buffer.push_back("line1".into());
+        app.log_loading_history = true;
+
+        // Response has fewer lines than requested = pod has no more history
+        app.merge_log_history(1, vec!["line1".into()]);
+
+        assert!(app.log_history_exhausted);
+    }
+
+    #[tokio::test]
+    async fn merge_log_history_caps_at_max_log_lines() {
+        let mut app = App::new_test();
+        app.log_generation = 1;
+        app.log_tail_lines = 200;
+        // Fill buffer near capacity
+        for i in 0..MAX_LOG_LINES - 2 {
+            app.log_buffer.push_back(format!("existing{i}"));
+        }
+        app.log_loading_history = true;
+
+        // History offers 10 new lines, but only 2 can fit
+        let mut history: Vec<String> = (0..10).map(|i| format!("new{i}")).collect();
+        history.push("existing0".into());
+        app.merge_log_history(1, history);
+
+        assert_eq!(app.log_buffer.len(), MAX_LOG_LINES);
+        assert_eq!(app.log_buffer[0], "new8");
+        assert_eq!(app.log_buffer[1], "new9");
+        assert_eq!(app.log_buffer[2], "existing0");
+    }
+
+    #[tokio::test]
+    async fn push_log_line_adjusts_scroll_on_eviction() {
+        let mut app = App::new_test();
+        for i in 0..MAX_LOG_LINES {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_scroll_offset = Some(50);
+
+        app.push_log_line("new".into());
+
+        assert_eq!(app.log_buffer.len(), MAX_LOG_LINES);
+        assert_eq!(app.log_scroll_offset, Some(49));
+    }
+
+    #[tokio::test]
+    async fn load_more_history_skips_when_exhausted() {
+        let mut app = App::new_test();
+        app.log_history_exhausted = true;
+        app.log_tail_lines = 100;
+
+        app.load_more_history();
+
+        assert_eq!(app.log_tail_lines, 100);
+        assert!(!app.log_loading_history);
+    }
+
+    #[tokio::test]
+    async fn load_more_history_caps_at_max() {
+        let mut app = App::new_test();
+        app.log_tail_lines = MAX_LOG_LINES as i64;
+
+        app.load_more_history();
+
+        assert!(app.log_history_exhausted);
+        assert!(!app.log_loading_history);
+        assert_eq!(app.log_tail_lines, MAX_LOG_LINES as i64);
     }
 }
