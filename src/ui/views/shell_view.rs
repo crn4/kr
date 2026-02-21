@@ -64,9 +64,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         lines.push(Line::from(spans));
     }
 
+    let title = if app.shell_title.is_empty() {
+        "Shell (Ctrl+Q to close)".to_string()
+    } else {
+        format!("{} (Ctrl+Q to close)", app.shell_title)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Shell (Ctrl+Q to close)")
+        .title(title)
         .style(STYLE_NORMAL);
 
     let paragraph = Paragraph::new(lines).block(block);

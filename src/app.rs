@@ -86,6 +86,7 @@ pub struct App {
     pub describe_scroll: usize,
 
     pub shell_session: Option<ShellSession>,
+    pub shell_title: String,
 
     pub clipboard_clear_task: Option<AbortHandle>,
 
@@ -163,6 +164,7 @@ impl App {
                 describe_content: Vec::new(),
                 describe_scroll: 0,
                 shell_session: None,
+                shell_title: String::new(),
                 clipboard_clear_task: None,
                 log_pod_name: String::new(),
                 log_namespace: String::new(),
@@ -480,6 +482,7 @@ impl App {
             "--",
             "sh",
         ]);
+        self.shell_title = format!("Shell: {pod_name}");
         self.spawn_pty_session(cmd);
     }
 
@@ -495,6 +498,7 @@ impl App {
             "--context",
             &self.current_context,
         ]);
+        self.shell_title = format!("Edit: {kind}/{name}");
         self.spawn_pty_session(cmd);
     }
 
@@ -753,6 +757,7 @@ impl App {
             describe_content: Vec::new(),
             describe_scroll: 0,
             shell_session: None,
+            shell_title: String::new(),
             clipboard_clear_task: None,
             log_pod_name: String::new(),
             log_namespace: String::new(),

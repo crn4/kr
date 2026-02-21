@@ -164,7 +164,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         AppMode::ScaleInput => "Enter replica count | Enter:Confirm | Esc:Cancel",
         AppMode::Confirm => "y:Confirm | n/Esc:Cancel",
         AppMode::DescribeView => "j/k:Scroll | PgUp/PgDn | g/G:Top/Bottom | q/Esc:Close",
-        AppMode::ShellView => "Ctrl+Q:Close shell",
+        AppMode::ShellView => if app.shell_title.starts_with("Edit") {
+            "Ctrl+Q:Close editor"
+        } else {
+            "Ctrl+Q:Close shell"
+        },
         AppMode::StatusFilter => "j/k:Nav | Space:Toggle | a:All | Enter:Apply | Esc:Cancel",
         AppMode::ContextSelect => "j/k:Nav | Enter:Select | Esc:Cancel",
         AppMode::NamespaceSelect => {
