@@ -1,4 +1,4 @@
-use crate::app::App;
+use crate::app::{App, LOG_CHROME_LINES};
 use crate::models::{AppMode, KubeResource, KubeResourceEvent, PendingAction, ResourceType};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -10,6 +10,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         AppMode::ContextSelect => handle_popup_input(app, key),
         AppMode::NamespaceSelect => handle_namespace_input(app, key),
         AppMode::LogView => handle_log_input(app, key),
+        AppMode::LogSearchInput => handle_log_search_input(app, key),
         AppMode::ScaleInput => handle_scale_input(app, key),
         AppMode::Confirm => handle_confirm_input(app, key),
         AppMode::ShellView => handle_shell_input(app, key),
@@ -179,20 +180,40 @@ fn handle_namespace_input(app: &mut App, key: KeyEvent) {
 
 fn log_max_scroll(app: &App) -> usize {
     let visible = crossterm::terminal::size()
-        .map(|(_, h)| (h as usize).saturating_sub(6))
+        .map(|(_, h)| (h as usize).saturating_sub(LOG_CHROME_LINES))
         .unwrap_or(20);
     app.log_buffer.len().saturating_sub(visible)
 }
 
 fn handle_log_input(app: &mut App, key: KeyEvent) {
     let page_size = crossterm::terminal::size()
-        .map(|(_, h)| (h as usize).saturating_sub(6))
+        .map(|(_, h)| (h as usize).saturating_sub(LOG_CHROME_LINES))
         .unwrap_or(20);
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Char('q') => {
             app.abort_log_stream();
             app.mode = AppMode::List;
+        }
+        KeyCode::Esc => {
+            if !app.log_search_query.is_empty() {
+                app.log_search_query.clear();
+                app.log_search_match_line = None;
+                app.log_search_pending = false;
+            } else {
+                app.abort_log_stream();
+                app.mode = AppMode::List;
+            }
+        }
+        KeyCode::Char('/') => {
+            app.log_search_input.clone_from(&app.log_search_query);
+            app.mode = AppMode::LogSearchInput;
+        }
+        KeyCode::Char('n') => {
+            app.log_search_next();
+        }
+        KeyCode::Char('N') => {
+            app.log_search_prev();
         }
         KeyCode::Char('j') | KeyCode::Down => {
             let max = log_max_scroll(app);
@@ -245,6 +266,28 @@ fn handle_log_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('g') => {
             app.log_scroll_offset = Some(0);
+        }
+        _ => {}
+    }
+}
+
+fn handle_log_search_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => {
+            app.log_search_query = app.log_search_input.to_ascii_lowercase();
+            app.log_search_match_line = None;
+            app.mode = AppMode::LogView;
+            app.log_search_next();
+        }
+        KeyCode::Esc => {
+            app.log_search_input.clear();
+            app.mode = AppMode::LogView;
+        }
+        KeyCode::Backspace => {
+            app.log_search_input.pop();
+        }
+        KeyCode::Char(c) => {
+            app.log_search_input.push(c);
         }
         _ => {}
     }
@@ -1643,5 +1686,121 @@ mod tests {
         assert_eq!(app.mode, AppMode::List);
         assert_eq!(app.filtered_items.len(), 1);
         assert_eq!(app.filtered_items[0].name(), "b");
+    }
+
+    #[tokio::test]
+    async fn log_slash_enters_search_input() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+
+        handle_input(&mut app, key(KeyCode::Char('/')));
+        assert_eq!(app.mode, AppMode::LogSearchInput);
+    }
+
+    #[tokio::test]
+    async fn log_search_input_accumulates_chars() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogSearchInput;
+
+        handle_input(&mut app, key(KeyCode::Char('e')));
+        handle_input(&mut app, key(KeyCode::Char('r')));
+        handle_input(&mut app, key(KeyCode::Char('r')));
+        assert_eq!(app.log_search_input, "err");
+    }
+
+    #[tokio::test]
+    async fn log_search_enter_confirms() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogSearchInput;
+        app.log_search_input = "test".to_string();
+
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, AppMode::LogView);
+        assert_eq!(app.log_search_query, "test");
+    }
+
+    #[tokio::test]
+    async fn log_search_esc_cancels() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogSearchInput;
+        app.log_search_input = "test".to_string();
+        app.log_search_query = "old".to_string();
+
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::LogView);
+        assert_eq!(app.log_search_input, "");
+        assert_eq!(app.log_search_query, "old");
+    }
+
+    #[tokio::test]
+    async fn log_esc_clears_search_first() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_search_query = "test".to_string();
+
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::LogView);
+        assert_eq!(app.log_search_query, "");
+    }
+
+    #[tokio::test]
+    async fn log_esc_exits_when_no_search() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_search_query.clear();
+
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn log_n_jumps_to_next_match() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_buffer.push_back("error found here".to_string());
+        for i in 51..200 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(100);
+        app.log_search_query = "error".to_string();
+
+        handle_input(&mut app, key(KeyCode::Char('n')));
+        assert_eq!(app.log_search_match_line, Some(50));
+    }
+
+    #[tokio::test]
+    async fn log_n_finds_above_scroll() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_buffer.push_back("error first".to_string());
+        for i in 1..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(10);
+        app.log_search_query = "error".to_string();
+
+        handle_input(&mut app, key(KeyCode::Char('n')));
+        assert_eq!(app.log_search_match_line, Some(0));
+    }
+
+    #[tokio::test]
+    async fn log_shift_n_jumps_to_prev() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        for i in 0..80 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_buffer.push_back("error found here".to_string());
+        for i in 81..200 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(50);
+        app.log_search_query = "error".to_string();
+
+        handle_input(&mut app, key(KeyCode::Char('N')));
+        assert_eq!(app.log_search_match_line, Some(80));
     }
 }

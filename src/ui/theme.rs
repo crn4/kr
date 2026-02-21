@@ -14,3 +14,8 @@ pub const STYLE_HIGHLIGHT: Style = Style::new()
     .fg(Color::Black)
     .bg(COLOR_HIGHLIGHT)
     .add_modifier(Modifier::BOLD);
+
+pub const STYLE_SEARCH_MATCH: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::Yellow)
+    .add_modifier(Modifier::BOLD);

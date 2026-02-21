@@ -21,6 +21,17 @@ pub struct ShellSession {
 }
 
 pub(crate) const MAX_LOG_LINES: usize = 10_000;
+pub(crate) const LOG_CHROME_LINES: usize = 6;
+
+pub(crate) fn contains_ascii_ci(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle_lower.len())
+        .any(|w| w.eq_ignore_ascii_case(needle_lower.as_bytes()))
+}
 
 pub struct App {
     pub client: Client,
@@ -91,6 +102,11 @@ pub struct App {
     pub status_filter_selected: HashSet<usize>,
     pub status_filter_state: ListState,
 
+    pub log_search_query: String,
+    pub log_search_input: String,
+    pub log_search_match_line: Option<usize>,
+    pub log_search_pending: bool,
+
     pub app_state: AppState,
 }
 
@@ -159,6 +175,10 @@ impl App {
                 status_filter_items: Vec::new(),
                 status_filter_selected: HashSet::new(),
                 status_filter_state: ListState::default(),
+                log_search_query: String::new(),
+                log_search_input: String::new(),
+                log_search_match_line: None,
+                log_search_pending: false,
                 app_state: AppState::load(),
             },
             rx,
@@ -223,6 +243,10 @@ impl App {
         self.log_loading_history = false;
         self.log_generation += 1;
         self.log_history_exhausted = false;
+        self.log_search_query.clear();
+        self.log_search_input.clear();
+        self.log_search_match_line = None;
+        self.log_search_pending = false;
         self.log_pod_name = pod_name.to_owned();
         self.log_namespace = namespace.to_owned();
         self.mode = AppMode::LogView;
@@ -280,6 +304,7 @@ impl App {
         if prepend_count == 0 {
             self.log_history_exhausted = true;
             self.log_loading_history = false;
+            self.resolve_pending_search(0);
             return;
         }
 
@@ -291,8 +316,45 @@ impl App {
         if let Some(offset) = &mut self.log_scroll_offset {
             *offset += prepend_count;
         }
+        if let Some(m) = &mut self.log_search_match_line {
+            *m += prepend_count;
+        }
 
         self.log_loading_history = false;
+        self.resolve_pending_search(prepend_count);
+    }
+
+    fn resolve_pending_search(&mut self, new_line_count: usize) {
+        if !self.log_search_pending {
+            return;
+        }
+        self.log_search_pending = false;
+        if new_line_count == 0 {
+            if self.log_history_exhausted {
+                self.set_error("Not found".to_string());
+            }
+            return;
+        }
+        let needle = &self.log_search_query;
+        if needle.is_empty() {
+            return;
+        }
+        for idx in (0..new_line_count).rev() {
+            if contains_ascii_ci(&self.log_buffer[idx], needle) {
+                self.log_search_match_line = Some(idx);
+                let visible = self.log_visible_height();
+                self.scroll_to_line(idx, visible);
+                return;
+            }
+        }
+        if self.log_history_exhausted {
+            self.set_error("Not found".to_string());
+        } else {
+            self.set_success(format!(
+                "Not found in {} loaded lines, press n to load more",
+                self.log_buffer.len()
+            ));
+        }
     }
 
     pub fn abort_log_stream(&mut self) {
@@ -302,6 +364,7 @@ impl App {
         if let Some(handle) = self.log_history_task.take() {
             handle.abort();
         }
+        self.log_search_pending = false;
     }
 
     pub fn load_namespaces(&self) {
@@ -523,6 +586,83 @@ impl App {
         self.log_buffer.push_back(line);
     }
 
+    pub fn log_search_next(&mut self) {
+        let visible = self.log_visible_height();
+        self.log_search_next_with_height(visible);
+    }
+
+    pub(crate) fn log_search_next_with_height(&mut self, visible: usize) {
+        if self.log_search_query.is_empty() || self.log_buffer.is_empty() {
+            return;
+        }
+        self.log_search_pending = false;
+        let needle = &self.log_search_query;
+        let len = self.log_buffer.len();
+        let start = self
+            .log_search_match_line
+            .and_then(|m| m.checked_sub(1))
+            .unwrap_or_else(|| {
+                self.log_scroll_offset
+                    .map(|o| (o + visible).min(len).saturating_sub(1))
+                    .unwrap_or(len.saturating_sub(1))
+            });
+        for idx in (0..=start).rev() {
+            if contains_ascii_ci(&self.log_buffer[idx], needle) {
+                self.log_search_match_line = Some(idx);
+                self.scroll_to_line(idx, visible);
+                return;
+            }
+        }
+        if self.log_history_exhausted {
+            self.set_error("No more matches".to_string());
+        } else {
+            self.log_search_pending = true;
+            self.load_more_history();
+        }
+    }
+
+    pub fn log_search_prev(&mut self) {
+        let visible = self.log_visible_height();
+        self.log_search_prev_with_height(visible);
+    }
+
+    pub(crate) fn log_search_prev_with_height(&mut self, visible: usize) {
+        if self.log_search_query.is_empty() || self.log_buffer.is_empty() {
+            return;
+        }
+        self.log_search_pending = false;
+        let needle = &self.log_search_query;
+        let len = self.log_buffer.len();
+        let start = self
+            .log_search_match_line
+            .map(|m| m + 1)
+            .unwrap_or_else(|| {
+                self.log_scroll_offset
+                    .unwrap_or(len.saturating_sub(visible))
+            });
+        for idx in start..len {
+            if contains_ascii_ci(&self.log_buffer[idx], needle) {
+                self.log_search_match_line = Some(idx);
+                self.scroll_to_line(idx, visible);
+                return;
+            }
+        }
+        self.set_error("No more matches".to_string());
+    }
+
+    fn log_visible_height(&self) -> usize {
+        crossterm::terminal::size()
+            .map(|(_, h)| (h as usize).saturating_sub(LOG_CHROME_LINES))
+            .unwrap_or(20)
+    }
+
+    fn scroll_to_line(&mut self, idx: usize, visible: usize) {
+        let len = self.log_buffer.len();
+        let centered = idx.saturating_sub(visible / 2);
+        let max = len.saturating_sub(visible);
+        self.log_scroll_offset = Some(centered.min(max));
+    }
+
     pub fn refresh_items(&mut self) {
         self.items.clear();
         match self.active_tab {
@@ -625,6 +765,10 @@ impl App {
             status_filter_items: Vec::new(),
             status_filter_selected: HashSet::new(),
             status_filter_state: ListState::default(),
+            log_search_query: String::new(),
+            log_search_input: String::new(),
+            log_search_match_line: None,
+            log_search_pending: false,
             app_state: AppState::default(),
         }
     }
@@ -1013,5 +1157,299 @@ mod tests {
         assert!(app.log_history_exhausted);
         assert!(!app.log_loading_history);
         assert_eq!(app.log_tail_lines, MAX_LOG_LINES as i64);
+    }
+
+    #[tokio::test]
+    async fn log_search_next_finds_match() {
+        let mut app = App::new_test();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_buffer.push_back("target match here".to_string());
+        for i in 51..200 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(100);
+        app.log_search_query = "target".to_string();
+
+        app.log_search_next_with_height(20);
+
+        assert_eq!(app.log_search_match_line, Some(50));
+        assert_eq!(app.log_scroll_offset, Some(40));
+    }
+
+    #[tokio::test]
+    async fn log_search_prev_finds_match() {
+        let mut app = App::new_test();
+        for i in 0..80 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_buffer.push_back("target match here".to_string());
+        for i in 81..200 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(50);
+        app.log_search_query = "target".to_string();
+
+        app.log_search_prev_with_height(20);
+
+        assert_eq!(app.log_search_match_line, Some(80));
+        assert_eq!(app.log_scroll_offset, Some(70));
+    }
+
+    #[tokio::test]
+    async fn log_search_next_finds_above_scroll() {
+        let mut app = App::new_test();
+        app.log_buffer.push_back("target line".to_string());
+        for i in 1..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(10);
+        app.log_search_query = "target".to_string();
+
+        app.log_search_next_with_height(20);
+
+        assert_eq!(app.log_scroll_offset, Some(0));
+    }
+
+    #[tokio::test]
+    async fn log_search_case_insensitive() {
+        let mut app = App::new_test();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_buffer.push_back("TARGET MATCH".to_string());
+        for i in 51..200 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_scroll_offset = Some(100);
+        app.log_search_query = "target".to_string();
+
+        app.log_search_next_with_height(20);
+
+        assert_eq!(app.log_search_match_line, Some(50));
+        assert_eq!(app.log_scroll_offset, Some(40));
+    }
+
+    #[tokio::test]
+    async fn log_search_next_empty_buffer_noop() {
+        let mut app = App::new_test();
+        app.log_search_query = "test".to_string();
+        app.log_scroll_offset = Some(0);
+
+        app.log_search_next_with_height(20);
+
+        assert_eq!(app.log_scroll_offset, Some(0));
+    }
+
+    #[tokio::test]
+    async fn log_search_next_empty_query_noop() {
+        let mut app = App::new_test();
+        app.log_buffer.push_back("some line".to_string());
+        app.log_scroll_offset = Some(0);
+        app.log_search_query.clear();
+
+        app.log_search_next_with_height(20);
+
+        assert_eq!(app.log_scroll_offset, Some(0));
+    }
+
+    #[tokio::test]
+    async fn log_search_prev_empty_buffer_noop() {
+        let mut app = App::new_test();
+        app.log_search_query = "test".to_string();
+        app.log_scroll_offset = Some(0);
+
+        app.log_search_prev_with_height(20);
+
+        assert_eq!(app.log_scroll_offset, Some(0));
+    }
+
+    #[tokio::test]
+    async fn log_search_prev_empty_query_noop() {
+        let mut app = App::new_test();
+        app.log_buffer.push_back("some line".to_string());
+        app.log_scroll_offset = Some(0);
+        app.log_search_query.clear();
+
+        app.log_search_prev_with_height(20);
+
+        assert_eq!(app.log_scroll_offset, Some(0));
+    }
+
+    #[tokio::test]
+    async fn log_search_next_advances_past_current() {
+        let mut app = App::new_test();
+        for i in 0..200 {
+            if i == 50 || i == 100 {
+                app.log_buffer.push_back(format!("error at {i}"));
+            } else {
+                app.log_buffer.push_back(format!("line {i}"));
+            }
+        }
+        app.log_scroll_offset = Some(150);
+        app.log_search_query = "error".to_string();
+
+        app.log_search_next_with_height(20);
+        assert_eq!(app.log_search_match_line, Some(100));
+        assert_eq!(app.log_scroll_offset, Some(90));
+
+        app.log_search_next_with_height(20);
+        assert_eq!(app.log_search_match_line, Some(50));
+        assert_eq!(app.log_scroll_offset, Some(40));
+
+        app.log_search_next_with_height(20);
+        assert!(app.log_search_pending);
+    }
+
+    #[tokio::test]
+    async fn log_search_prev_advances_past_current() {
+        let mut app = App::new_test();
+        for i in 0..200 {
+            if i == 50 || i == 100 {
+                app.log_buffer.push_back(format!("error at {i}"));
+            } else {
+                app.log_buffer.push_back(format!("line {i}"));
+            }
+        }
+        app.log_search_match_line = Some(50);
+        app.log_scroll_offset = Some(40);
+        app.log_search_query = "error".to_string();
+
+        app.log_search_prev_with_height(20);
+        assert_eq!(app.log_search_match_line, Some(100));
+        assert_eq!(app.log_scroll_offset, Some(90));
+
+        app.log_search_prev_with_height(20);
+        assert!(app.last_error.as_ref().unwrap().contains("No more matches"));
+    }
+
+    #[tokio::test]
+    async fn log_search_not_found_sets_pending() {
+        let mut app = App::new_test();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_search_query = "nothere".to_string();
+
+        app.log_search_next_with_height(20);
+
+        assert!(app.log_search_pending);
+    }
+
+    #[tokio::test]
+    async fn log_search_exhausted_shows_not_found() {
+        let mut app = App::new_test();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_history_exhausted = true;
+        app.log_search_query = "nothere".to_string();
+
+        app.log_search_next_with_height(20);
+
+        assert!(!app.log_search_pending);
+        assert!(app.last_error.as_ref().unwrap().contains("No more matches"));
+    }
+
+    #[tokio::test]
+    async fn log_search_pending_resolved_on_merge() {
+        let mut app = App::new_test();
+        app.log_buffer.push_back("existing".to_string());
+        app.log_generation = 1;
+        app.log_tail_lines = 200;
+        app.log_search_query = "target".to_string();
+        app.log_search_pending = true;
+        app.log_loading_history = true;
+
+        let history = vec!["target found".into(), "existing".into()];
+        app.merge_log_history(1, history);
+
+        assert!(!app.log_search_pending);
+        assert_eq!(app.log_search_match_line, Some(0));
+    }
+
+    #[tokio::test]
+    async fn log_search_pending_no_match_in_new_lines() {
+        let mut app = App::new_test();
+        app.log_buffer.push_back("existing".to_string());
+        app.log_generation = 1;
+        app.log_tail_lines = 2;
+        app.log_search_query = "nothere".to_string();
+        app.log_search_pending = true;
+        app.log_loading_history = true;
+
+        let history = vec!["other line".into(), "existing".into()];
+        app.merge_log_history(1, history);
+
+        assert!(!app.log_search_pending);
+        assert!(app.last_success.as_ref().unwrap().contains("press n"));
+    }
+
+    #[tokio::test]
+    async fn log_search_pending_exhausted_no_match() {
+        let mut app = App::new_test();
+        app.log_buffer.push_back("existing".to_string());
+        app.log_generation = 1;
+        app.log_tail_lines = 200;
+        app.log_search_query = "nothere".to_string();
+        app.log_search_pending = true;
+        app.log_loading_history = true;
+
+        let history = vec!["other line".into(), "existing".into()];
+        app.merge_log_history(1, history);
+
+        assert!(!app.log_search_pending);
+        assert!(app.last_error.as_ref().unwrap().contains("Not found"));
+    }
+
+    #[tokio::test]
+    async fn log_search_match_line_adjusted_on_history_prepend() {
+        let mut app = App::new_test();
+        app.log_buffer.push_back("match line".to_string());
+        app.log_buffer.push_back("other".to_string());
+        app.log_generation = 1;
+        app.log_tail_lines = 200;
+        app.log_search_match_line = Some(0);
+        app.log_loading_history = true;
+
+        let history = vec!["new1".into(), "new2".into(), "match line".into()];
+        app.merge_log_history(1, history);
+
+        assert_eq!(app.log_search_match_line, Some(2));
+    }
+
+    #[tokio::test]
+    async fn log_search_next_single_match_loads_history() {
+        let mut app = App::new_test();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_buffer[20] = "error here".to_string();
+        app.log_search_query = "error".to_string();
+
+        app.log_search_next_with_height(20);
+        assert_eq!(app.log_search_match_line, Some(20));
+
+        app.log_search_next_with_height(20);
+        assert!(app.log_search_pending);
+    }
+
+    #[tokio::test]
+    async fn log_search_next_single_match_stops_when_exhausted() {
+        let mut app = App::new_test();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_buffer[20] = "error here".to_string();
+        app.log_history_exhausted = true;
+        app.log_search_query = "error".to_string();
+
+        app.log_search_next_with_height(20);
+        assert_eq!(app.log_search_match_line, Some(20));
+
+        app.log_search_next_with_height(20);
+        assert_eq!(app.log_search_match_line, Some(20));
+        assert!(!app.log_search_pending);
     }
 }
