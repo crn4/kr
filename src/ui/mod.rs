@@ -95,7 +95,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
 
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.mode != AppMode::LogView && app.is_loading && app.filtered_items.is_empty() {
+    if !matches!(app.mode, AppMode::LogView | AppMode::LogSearchInput)
+        && app.is_loading
+        && app.filtered_items.is_empty()
+    {
         let resource = match app.active_tab {
             ResourceType::Pod => "pods",
             ResourceType::Deployment => "deployments",
@@ -120,7 +123,7 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     match app.mode {
-        AppMode::LogView => logs_view::draw(f, app, area),
+        AppMode::LogView | AppMode::LogSearchInput => logs_view::draw(f, app, area),
         _ => match app.active_tab {
             ResourceType::Pod => pods_view::draw(f, app, area),
             ResourceType::Deployment => deployments_view::draw(f, app, area),
@@ -156,7 +159,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         },
         AppMode::FilterInput => "Type to filter | Esc:Cancel | Enter:Confirm",
         AppMode::SecretDecode => "j/k:Scroll | r:Reveal | c:Copy | q/Esc:Close",
-        AppMode::LogView => "j/k:Scroll | PgUp/PgDn | g/G:Top/Follow | q/Esc:Back",
+        AppMode::LogView => "j/k:Scroll | PgUp/PgDn | g/G:Top/Follow | /:Search n/N:Next/Prev | q/Esc:Back",
+        AppMode::LogSearchInput => "Type to search | Enter:Confirm | Esc:Cancel",
         AppMode::ScaleInput => "Enter replica count | Enter:Confirm | Esc:Cancel",
         AppMode::Confirm => "y:Confirm | n/Esc:Cancel",
         AppMode::DescribeView => "j/k:Scroll | PgUp/PgDn | g/G:Top/Bottom | q/Esc:Close",

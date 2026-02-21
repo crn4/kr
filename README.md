@@ -8,7 +8,7 @@ A fast, lightweight Kubernetes TUI built in Rust.
 
 - **Three resource views** — Pods, Deployments, Secrets with Tab switching
 - **Real-time updates** — watches resources via Kubernetes API (no polling)
-- **Pod logs** — streaming log view with auto-follow and manual scroll
+- **Pod logs** — streaming log view with auto-follow, manual scroll and search
 - **Shell access** — embedded interactive shell sessions inside pods
 - **Secret decoding** — view decoded secret values, copy to clipboard
 - **Deployment management** — scale replicas, rollout restart
@@ -103,6 +103,8 @@ kr -c "get pods -n kube-system"
 | `j` / `k` | Scroll |
 | `g` | Jump to top |
 | `G` | Resume auto-follow |
+| `/` | Search |
+| `n` / `N` | Next / previous search match |
 | `q` / `Esc` | Exit |
 
 ### Shell
