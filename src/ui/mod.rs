@@ -49,6 +49,13 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .margin(0)
         .split(area);
 
+    let version_label = concat!("v", env!("CARGO_PKG_VERSION"), " ");
+    let version_width = version_label.len() as u16;
+    let tab_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(version_width)])
+        .split(chunks[0]);
+
     let titles = ["Pods", "Deployments", "Secrets"]
         .iter()
         .map(|t| Line::from(Span::styled(*t, Style::default().fg(COLOR_TEXT))))
@@ -62,7 +69,11 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             ResourceType::Deployment => 1,
             ResourceType::Secret => 2,
         });
-    f.render_widget(tabs, chunks[0]);
+    f.render_widget(tabs, tab_row[0]);
+
+    let version = Paragraph::new(version_label)
+        .style(Style::default().fg(COLOR_VERSION));
+    f.render_widget(version, tab_row[1]);
 
     let filter_part = if app.filter_query.is_empty() {
         String::new()
