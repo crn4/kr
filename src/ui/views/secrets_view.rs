@@ -52,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     .highlight_symbol("> ")
     .highlight_spacing(HighlightSpacing::Always);
 
-    if app.filtered_items.is_empty() && !app.is_loading {
+    if app.filtered_items.is_empty() && !app.is_active_tab_loading() {
         let msg = if app.last_error.is_some() {
             "" // error shown in footer
         } else if app.filter_query.is_empty() {

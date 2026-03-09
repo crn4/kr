@@ -27,6 +27,22 @@ pub enum ResourceType {
     Secret,
 }
 
+impl ResourceType {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Pod => 0,
+            Self::Deployment => 1,
+            Self::Secret => 2,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct TaggedWatcherEvent {
+    pub tab: ResourceType,
+    pub event: KubeResourceEvent,
+}
+
 #[derive(Clone, Debug)]
 pub enum KubeResource {
     Pod(Arc<Pod>),
@@ -45,6 +61,7 @@ impl KubeResource {
     }
 }
 
+#[derive(Debug)]
 pub enum KubeResourceEvent {
     Refresh,
     InitialListDone,
@@ -167,5 +184,17 @@ mod tests {
     fn resource_type_equality() {
         assert_eq!(ResourceType::Pod, ResourceType::Pod);
         assert_ne!(ResourceType::Pod, ResourceType::Secret);
+    }
+
+    #[test]
+    fn resource_type_index_distinct() {
+        let indices = [
+            ResourceType::Pod.index(),
+            ResourceType::Deployment.index(),
+            ResourceType::Secret.index(),
+        ];
+        assert_eq!(indices[0], 0);
+        assert_eq!(indices[1], 1);
+        assert_eq!(indices[2], 2);
     }
 }

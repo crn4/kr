@@ -70,8 +70,9 @@ pub struct App {
     pub last_error: Option<String>,
     pub last_success: Option<String>,
     pub message_time: Option<Instant>,
-    pub is_loading: bool,
-    pub loading_since: Option<Instant>,
+    pub tab_loading: [bool; 3],
+    pub tab_loading_since: [Option<Instant>; 3],
+    pub tab_forbidden: [bool; 3],
     pub dirty: bool,
 
     pub secret_scroll: usize,
@@ -156,8 +157,9 @@ impl App {
                 last_error: None,
                 last_success: None,
                 message_time: None,
-                is_loading: true,
-                loading_since: Some(Instant::now()),
+                tab_loading: [false; 3],
+                tab_loading_since: [None; 3],
+                tab_forbidden: [false; 3],
                 dirty: true,
                 secret_scroll: 0,
                 secret_table_state: TableState::default(),
@@ -219,11 +221,17 @@ impl App {
     }
 
     fn reset_tab_state(&mut self) {
-        self.items.clear();
-        self.filtered_items.clear();
         self.table_state.select(None);
         self.selected_indices.clear();
         self.status_filter.clear();
+    }
+
+    pub fn is_active_tab_loading(&self) -> bool {
+        self.tab_loading[self.active_tab.index()]
+    }
+
+    pub fn active_tab_loading_since(&self) -> Option<Instant> {
+        self.tab_loading_since[self.active_tab.index()]
     }
 
     pub fn get_selected_resource(&self) -> Option<&KubeResource> {
@@ -759,8 +767,9 @@ impl App {
             last_error: None,
             last_success: None,
             message_time: None,
-            is_loading: false,
-            loading_since: None,
+            tab_loading: [false; 3],
+            tab_loading_since: [None; 3],
+            tab_forbidden: [false; 3],
             dirty: true,
             secret_scroll: 0,
             secret_table_state: TableState::default(),
@@ -898,17 +907,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tab_switch_clears_state() {
+    async fn tab_switch_clears_ui_state() {
         let mut app = App::new_test();
         app.items = vec![make_pod("a")];
         app.filtered_items = vec![make_pod("a")];
         app.table_state.select(Some(0));
+        app.selected_indices.insert(0);
 
         app.next_tab();
 
-        assert!(app.items.is_empty());
-        assert!(app.filtered_items.is_empty());
         assert_eq!(app.table_state.selected(), None);
+        assert!(app.selected_indices.is_empty());
     }
 
     #[tokio::test]
