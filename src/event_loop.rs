@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{Event, EventStream};
 use futures::{FutureExt, StreamExt};
+use futures::stream::{BoxStream, SelectAll};
 use ratatui::{Terminal, backend::Backend};
 use std::time::Duration;
 use tokio::time;
@@ -8,9 +9,8 @@ use tokio::time;
 use crate::app::App;
 use crate::input::handle_input;
 use crate::k8s::watcher::reflect_resources;
-use crate::models::{AppMode, KubeResourceEvent, ResourceType};
+use crate::models::{AppMode, KubeResourceEvent, ResourceType, TaggedWatcherEvent};
 use crate::ui::draw;
-use futures::stream::BoxStream;
 use kube::runtime::watcher;
 
 fn is_forbidden(err: &watcher::Error) -> bool {
@@ -43,66 +43,108 @@ fn map_watcher_event<K>(event: Result<watcher::Event<K>, watcher::Error>) -> Kub
     }
 }
 
-fn create_watcher(app: &mut App) -> BoxStream<'static, KubeResourceEvent> {
+fn tag_stream(
+    stream: impl futures::Stream<Item = KubeResourceEvent> + Send + 'static,
+    tab: ResourceType,
+) -> BoxStream<'static, TaggedWatcherEvent> {
+    Box::pin(stream.scan(false, move |stopped, event| {
+        if *stopped {
+            return std::future::ready(None);
+        }
+        if matches!(&event, KubeResourceEvent::WatcherForbidden(_)) {
+            *stopped = true;
+        }
+        std::future::ready(Some(TaggedWatcherEvent { tab, event }))
+    }))
+}
+
+fn create_watcher_for_tab(
+    app: &mut App,
+    tab: ResourceType,
+) -> BoxStream<'static, TaggedWatcherEvent> {
     let client = app.client.clone();
     let ns = app.current_namespace.clone();
 
-    match app.active_tab {
+    match tab {
         ResourceType::Pod => {
             let (store, stream) = reflect_resources(client, &ns);
             app.pod_store = Some(store);
-            Box::pin(stream.map(map_watcher_event))
+            tag_stream(stream.map(map_watcher_event), tab)
         }
         ResourceType::Deployment => {
             let (store, stream) = reflect_resources(client, &ns);
             app.deployment_store = Some(store);
-            Box::pin(stream.map(map_watcher_event))
+            tag_stream(stream.map(map_watcher_event), tab)
         }
         ResourceType::Secret => {
             let (store, stream) = reflect_resources(client, &ns);
             app.secret_store = Some(store);
-            Box::pin(stream.map(map_watcher_event))
+            tag_stream(stream.map(map_watcher_event), tab)
         }
     }
 }
 
-fn handle_watcher_event(
+fn ensure_watcher(
     app: &mut App,
-    event: KubeResourceEvent,
-    watcher: &mut BoxStream<'static, KubeResourceEvent>,
-) -> bool {
-    match event {
+    tab: ResourceType,
+    watchers: &mut SelectAll<BoxStream<'static, TaggedWatcherEvent>>,
+    watcher_active: &mut [bool; 3],
+) {
+    let idx = tab.index();
+    if watcher_active[idx] || app.tab_forbidden[idx] {
+        return;
+    }
+    let stream = create_watcher_for_tab(app, tab);
+    watchers.push(stream);
+    watcher_active[idx] = true;
+    app.tab_loading[idx] = true;
+    app.tab_loading_since[idx] = Some(std::time::Instant::now());
+}
+
+fn handle_tagged_event(app: &mut App, tagged: TaggedWatcherEvent, watcher_active: &mut [bool; 3]) -> bool {
+    let tab = tagged.tab;
+    let idx = tab.index();
+    let is_active = tab == app.active_tab;
+
+    match tagged.event {
         KubeResourceEvent::WatcherForbidden(msg) => {
-            let resource_kind = match app.active_tab {
-                ResourceType::Pod => "pods",
-                ResourceType::Deployment => "deployments",
-                ResourceType::Secret => "secrets",
-            };
-            let short_msg = if msg.is_empty() {
-                format!("Access denied: cannot list {resource_kind}")
-            } else {
-                format!("Access denied: {resource_kind} — {msg}")
-            };
-            app.set_error(short_msg);
-            app.is_loading = false;
-            app.loading_since = None;
-            *watcher = Box::pin(futures::stream::pending());
-            app.dirty = true;
+            watcher_active[idx] = false;
+            app.tab_loading[idx] = false;
+            app.tab_loading_since[idx] = None;
+            app.tab_forbidden[idx] = true;
+            if is_active {
+                let resource_kind = match tab {
+                    ResourceType::Pod => "pods",
+                    ResourceType::Deployment => "deployments",
+                    ResourceType::Secret => "secrets",
+                };
+                let short_msg = if msg.is_empty() {
+                    format!("Access denied: cannot list {resource_kind}")
+                } else {
+                    format!("Access denied: {resource_kind} — {msg}")
+                };
+                app.set_error(short_msg);
+                app.dirty = true;
+            }
             false
         }
         KubeResourceEvent::Error(msg) => {
-            app.set_error(msg);
-            app.dirty = true;
+            if is_active {
+                app.set_error(msg);
+                app.dirty = true;
+            }
             false
         }
         KubeResourceEvent::InitialListDone => {
-            app.refresh_items();
-            app.is_loading = false;
-            app.loading_since = None;
-            app.dirty = true;
+            app.tab_loading[idx] = false;
+            app.tab_loading_since[idx] = None;
+            if is_active {
+                app.dirty = true;
+                return true;
+            }
             false
         }
-        _ => !app.is_loading,
+        _ => is_active && !app.tab_loading[idx],
     }
 }
 
@@ -159,7 +201,9 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
 
     let mut current_tab = app.active_tab;
     let mut current_ns = app.current_namespace.clone();
-    let mut watcher = create_watcher(&mut app);
+    let mut watchers: SelectAll<BoxStream<'static, TaggedWatcherEvent>> = SelectAll::new();
+    let mut watcher_active = [false; 3];
+    ensure_watcher(&mut app, current_tab, &mut watchers, &mut watcher_active);
 
     if let Ok(ctxs) = crate::k8s::config::list_contexts() {
         app.available_contexts = ctxs;
@@ -229,21 +273,24 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
             app.dirty = true;
         }
 
-        if app.active_tab != current_tab
-            || app.current_namespace != current_ns
-            || app.current_context != current_ctx
-        {
-            current_tab = app.active_tab;
+        let ns_or_ctx_changed = app.current_namespace != current_ns
+            || app.current_context != current_ctx;
+
+        if ns_or_ctx_changed {
             current_ns = app.current_namespace.clone();
             current_ctx = app.current_context.clone();
+            current_tab = app.active_tab;
 
+            watchers = SelectAll::new();
+            watcher_active = [false; 3];
             app.items.clear();
             app.filtered_items.clear();
             app.pod_store = None;
             app.deployment_store = None;
             app.secret_store = None;
-            app.is_loading = true;
-            app.loading_since = Some(std::time::Instant::now());
+            app.tab_loading = [false; 3];
+            app.tab_loading_since = [None; 3];
+            app.tab_forbidden = [false; 3];
             if app
                 .last_error
                 .as_ref()
@@ -253,7 +300,13 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
                 app.message_time = None;
             }
 
-            watcher = create_watcher(&mut app);
+            ensure_watcher(&mut app, current_tab, &mut watchers, &mut watcher_active);
+            app.refresh_items();
+            app.dirty = true;
+        } else if app.active_tab != current_tab {
+            current_tab = app.active_tab;
+
+            ensure_watcher(&mut app, current_tab, &mut watchers, &mut watcher_active);
             app.refresh_items();
             app.dirty = true;
         }
@@ -269,10 +322,10 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
                    app.dirty = true;
                }
             }
-            Some(event) = watcher.next() => {
-                let mut needs_refresh = handle_watcher_event(&mut app, event, &mut watcher);
-                while let Some(Some(event)) = watcher.next().now_or_never() {
-                    needs_refresh |= handle_watcher_event(&mut app, event, &mut watcher);
+            Some(event) = watchers.next() => {
+                let mut needs_refresh = handle_tagged_event(&mut app, event, &mut watcher_active);
+                while let Some(Some(event)) = watchers.next().now_or_never() {
+                    needs_refresh |= handle_tagged_event(&mut app, event, &mut watcher_active);
                 }
                 if needs_refresh {
                     app.refresh_items();
@@ -377,5 +430,142 @@ mod tests {
         let pod = Pod::default();
         let event = map_watcher_event::<Pod>(Ok(watcher::Event::Apply(pod)));
         assert!(matches!(event, KubeResourceEvent::Refresh));
+    }
+
+    use crate::app::App;
+
+    #[tokio::test]
+    async fn tagged_init_done_active_tab_returns_refresh() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.tab_loading[0] = true;
+        let mut watcher_active = [true, false, false];
+
+        let tagged = TaggedWatcherEvent {
+            tab: ResourceType::Pod,
+            event: KubeResourceEvent::InitialListDone,
+        };
+        let needs_refresh = handle_tagged_event(&mut app, tagged, &mut watcher_active);
+
+        assert!(needs_refresh);
+        assert!(!app.tab_loading[0]);
+        assert!(app.tab_loading_since[0].is_none());
+    }
+
+    #[tokio::test]
+    async fn tagged_init_done_background_tab_no_refresh() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.tab_loading[1] = true;
+        let mut watcher_active = [true, true, false];
+
+        let tagged = TaggedWatcherEvent {
+            tab: ResourceType::Deployment,
+            event: KubeResourceEvent::InitialListDone,
+        };
+        let needs_refresh = handle_tagged_event(&mut app, tagged, &mut watcher_active);
+
+        assert!(!needs_refresh);
+        assert!(!app.tab_loading[1]);
+    }
+
+    #[tokio::test]
+    async fn tagged_forbidden_sets_tab_forbidden() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.tab_loading[2] = true;
+        let mut watcher_active = [true, false, true];
+
+        let tagged = TaggedWatcherEvent {
+            tab: ResourceType::Secret,
+            event: KubeResourceEvent::WatcherForbidden("denied".into()),
+        };
+        handle_tagged_event(&mut app, tagged, &mut watcher_active);
+
+        assert!(app.tab_forbidden[2]);
+        assert!(!watcher_active[2]);
+        assert!(!app.tab_loading[2]);
+    }
+
+    #[tokio::test]
+    async fn tagged_forbidden_active_tab_shows_error() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Secret;
+        let mut watcher_active = [false, false, true];
+
+        let tagged = TaggedWatcherEvent {
+            tab: ResourceType::Secret,
+            event: KubeResourceEvent::WatcherForbidden("denied".into()),
+        };
+        handle_tagged_event(&mut app, tagged, &mut watcher_active);
+
+        assert!(app.last_error.is_some());
+        assert!(app.last_error.as_ref().unwrap().contains("Access denied"));
+    }
+
+    #[tokio::test]
+    async fn tagged_forbidden_background_tab_no_error() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        let mut watcher_active = [true, false, true];
+
+        let tagged = TaggedWatcherEvent {
+            tab: ResourceType::Secret,
+            event: KubeResourceEvent::WatcherForbidden("denied".into()),
+        };
+        handle_tagged_event(&mut app, tagged, &mut watcher_active);
+
+        assert!(app.tab_forbidden[2]);
+        assert!(app.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn tagged_refresh_active_tab_needs_refresh() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        let mut watcher_active = [true, false, false];
+
+        let tagged = TaggedWatcherEvent {
+            tab: ResourceType::Pod,
+            event: KubeResourceEvent::Refresh,
+        };
+        let needs_refresh = handle_tagged_event(&mut app, tagged, &mut watcher_active);
+
+        assert!(needs_refresh);
+    }
+
+    #[tokio::test]
+    async fn tagged_refresh_background_tab_no_refresh() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        let mut watcher_active = [true, true, false];
+
+        let tagged = TaggedWatcherEvent {
+            tab: ResourceType::Deployment,
+            event: KubeResourceEvent::Refresh,
+        };
+        let needs_refresh = handle_tagged_event(&mut app, tagged, &mut watcher_active);
+
+        assert!(!needs_refresh);
+    }
+
+    #[tokio::test]
+    async fn tag_stream_terminates_after_forbidden() {
+        let events = vec![
+            KubeResourceEvent::Refresh,
+            KubeResourceEvent::WatcherForbidden("denied".into()),
+            KubeResourceEvent::Refresh,
+        ];
+        let stream = futures::stream::iter(events);
+        let mut tagged = tag_stream(stream, ResourceType::Pod);
+
+        let first = tagged.next().await;
+        assert!(matches!(first, Some(TaggedWatcherEvent { event: KubeResourceEvent::Refresh, .. })));
+
+        let second = tagged.next().await;
+        assert!(matches!(second, Some(TaggedWatcherEvent { event: KubeResourceEvent::WatcherForbidden(_), .. })));
+
+        let third = tagged.next().await;
+        assert!(third.is_none());
     }
 }

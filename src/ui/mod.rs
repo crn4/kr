@@ -107,7 +107,7 @@ const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
 
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
     if !matches!(app.mode, AppMode::LogView | AppMode::LogSearchInput)
-        && app.is_loading
+        && app.is_active_tab_loading()
         && app.filtered_items.is_empty()
     {
         let resource = match app.active_tab {
@@ -116,11 +116,11 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
             ResourceType::Secret => "secrets",
         };
         let elapsed = app
-            .loading_since
+            .active_tab_loading_since()
             .map(|t| format!(" ({:.1}s)", t.elapsed().as_secs_f64()))
             .unwrap_or_default();
         let spinner_idx = app
-            .loading_since
+            .active_tab_loading_since()
             .map(|t| (t.elapsed().as_millis() / 250) as usize % SPINNER.len())
             .unwrap_or(0);
         let label = format!(

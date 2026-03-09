@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
-    let header_cells = ["Name", "Type", "Data Count", "Age"]
+    let header_cells = ["", "Name", "Type", "Data Count", "Age"]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(COLOR_HIGHLIGHT)));
     let header = Row::new(header_cells)
@@ -18,28 +18,34 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .height(1)
         .bottom_margin(1);
 
-    let rows = app.filtered_items.iter().map(|item| {
-        let KubeResource::Secret(s) = item else {
-            return Row::new(vec![Cell::from(item.name().to_owned())]).height(1);
-        };
+    let rows: Vec<Row> = app
+        .filtered_items
+        .iter()
+        .map(|item| {
+            let KubeResource::Secret(s) = item else {
+                return Row::new(vec![Cell::from(" "), Cell::from(item.name())]).height(1);
+            };
 
-        let name = s.metadata.name.as_deref().unwrap_or_default();
-        let type_ = s.type_.as_deref().unwrap_or_default();
-        let count = s.data.as_ref().map(|d| d.len()).unwrap_or(0);
-        let age = crate::utils::get_resource_age(s.metadata.creation_timestamp.as_ref());
+            let name = s.metadata.name.as_deref().unwrap_or_default();
+            let type_ = s.type_.as_deref().unwrap_or_default();
+            let count = s.data.as_ref().map(|d| d.len()).unwrap_or(0);
+            let age = crate::utils::get_resource_age(s.metadata.creation_timestamp.as_ref());
 
-        Row::new(vec![
-            Cell::from(name.to_owned()),
-            Cell::from(type_.to_owned()),
-            Cell::from(count.to_string()),
-            Cell::from(age),
-        ])
-        .height(1)
-    });
+            Row::new(vec![
+                Cell::from(" "),
+                Cell::from(name),
+                Cell::from(type_),
+                Cell::from(count.to_string()),
+                Cell::from(age),
+            ])
+            .height(1)
+        })
+        .collect();
 
     let t = Table::new(
         rows,
-        [
+        &[
+            Constraint::Length(2),
             Constraint::Fill(1),
             Constraint::Length(25),
             Constraint::Length(12),
@@ -52,7 +58,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     .highlight_symbol("> ")
     .highlight_spacing(HighlightSpacing::Always);
 
-    if app.filtered_items.is_empty() && !app.is_loading {
+    if app.filtered_items.is_empty() && !app.is_active_tab_loading() {
         let msg = if app.last_error.is_some() {
             "" // error shown in footer
         } else if app.filter_query.is_empty() {
