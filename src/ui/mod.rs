@@ -158,12 +158,16 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     }
     let help = match app.mode {
         AppMode::List => match app.active_tab {
-            ResourceType::Pod => {
-                "q:Quit /:Filter f:Status j/k:Nav g/G:Top/End Space:Sel ^a:All Tab:Next l:Logs s:Shell D:Del d:Desc e:Edit c:Ctx n:NS"
-            }
-            ResourceType::Deployment => {
-                "q:Quit /:Filter j/k:Nav g/G:Top/End PgUp/PgDn Space:Sel ^a:All Tab:Next S:Scale r:Restart D:Del d:Desc e:Edit c:Ctx n:NS"
-            }
+            ResourceType::Pod => if app.wide_pods {
+                "q:Quit /:Filter f:Status j/k:Nav g/G:Top/End Space:Sel ^a:All Tab:Next w:Compact l:Logs s:Shell D:Del d:Desc e:Edit c:Ctx n:NS"
+            } else {
+                "q:Quit /:Filter f:Status j/k:Nav g/G:Top/End Space:Sel ^a:All Tab:Next w:Wide l:Logs s:Shell D:Del d:Desc e:Edit c:Ctx n:NS"
+            },
+            ResourceType::Deployment => if app.wide_deployments {
+                "q:Quit /:Filter j/k:Nav g/G:Top/End PgUp/PgDn Space:Sel ^a:All Tab:Next w:Compact S:Scale r:Restart D:Del d:Desc e:Edit c:Ctx n:NS"
+            } else {
+                "q:Quit /:Filter j/k:Nav g/G:Top/End PgUp/PgDn Space:Sel ^a:All Tab:Next w:Wide S:Scale r:Restart D:Del d:Desc e:Edit c:Ctx n:NS"
+            },
             ResourceType::Secret => {
                 "q:Quit /:Filter j/k:Nav g/G:Top/End PgUp/PgDn Tab:Next Enter/x:Decode c:Ctx n:NS"
             }

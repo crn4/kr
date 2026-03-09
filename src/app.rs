@@ -108,6 +108,9 @@ pub struct App {
     pub log_search_match_line: Option<usize>,
     pub log_search_pending: bool,
 
+    pub wide_pods: bool,
+    pub wide_deployments: bool,
+
     pub app_state: AppState,
 }
 
@@ -181,10 +184,20 @@ impl App {
                 log_search_input: String::new(),
                 log_search_match_line: None,
                 log_search_pending: false,
+                wide_pods: false,
+                wide_deployments: false,
                 app_state: AppState::load(),
             },
             rx,
         ))
+    }
+
+    pub fn toggle_wide(&mut self) {
+        match self.active_tab {
+            ResourceType::Pod => self.wide_pods = !self.wide_pods,
+            ResourceType::Deployment => self.wide_deployments = !self.wide_deployments,
+            ResourceType::Secret => {}
+        }
     }
 
     pub fn next_tab(&mut self) {
@@ -774,6 +787,8 @@ impl App {
             log_search_input: String::new(),
             log_search_match_line: None,
             log_search_pending: false,
+            wide_pods: false,
+            wide_deployments: false,
             app_state: AppState::default(),
         }
     }
