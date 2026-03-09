@@ -388,6 +388,13 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             app.mode = AppMode::StatusFilter;
         }
 
+        KeyCode::Char('w')
+            if app.active_tab == ResourceType::Pod
+                || app.active_tab == ResourceType::Deployment =>
+        {
+            app.toggle_wide();
+        }
+
         KeyCode::Char('l') if app.active_tab == ResourceType::Pod => {
             if let Some(pod) = app.get_selected_resource() {
                 let name = pod.name().to_owned();
@@ -1802,5 +1809,42 @@ mod tests {
 
         handle_input(&mut app, key(KeyCode::Char('N')));
         assert_eq!(app.log_search_match_line, Some(80));
+    }
+
+    #[tokio::test]
+    async fn w_toggles_wide_view_for_pods() {
+        let mut app = App::new_test();
+        app.mode = AppMode::List;
+        app.active_tab = ResourceType::Pod;
+        assert!(!app.wide_pods);
+
+        handle_input(&mut app, key(KeyCode::Char('w')));
+        assert!(app.wide_pods);
+        assert!(!app.wide_deployments);
+
+        handle_input(&mut app, key(KeyCode::Char('w')));
+        assert!(!app.wide_pods);
+    }
+
+    #[tokio::test]
+    async fn w_toggles_wide_view_for_deployments() {
+        let mut app = App::new_test();
+        app.mode = AppMode::List;
+        app.active_tab = ResourceType::Deployment;
+
+        handle_input(&mut app, key(KeyCode::Char('w')));
+        assert!(app.wide_deployments);
+        assert!(!app.wide_pods);
+    }
+
+    #[tokio::test]
+    async fn w_ignored_on_secrets_tab() {
+        let mut app = App::new_test();
+        app.mode = AppMode::List;
+        app.active_tab = ResourceType::Secret;
+
+        handle_input(&mut app, key(KeyCode::Char('w')));
+        assert!(!app.wide_pods);
+        assert!(!app.wide_deployments);
     }
 }

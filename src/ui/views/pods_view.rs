@@ -9,7 +9,13 @@ use ratatui::{
 };
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
-    let header_cells = ["", "Name", "Ready", "Status", "Restarts", "Age"]
+    let wide = app.wide_pods;
+    let cols: &[&str] = if wide {
+        &["", "Name", "Ready", "Status", "Restarts", "Age", "IP", "Node", "Image"]
+    } else {
+        &["", "Name", "Ready", "Status", "Restarts", "Age"]
+    };
+    let header_cells = cols
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(COLOR_HIGHLIGHT)));
     let header = Row::new(header_cells)
@@ -22,14 +28,11 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, item)| {
-            let marker = if app.selected_indices.contains(&idx) {
-                "●"
-            } else {
-                " "
-            };
+            let selected = app.selected_indices.contains(&idx);
+            let marker = if selected { "●" } else { " " };
 
             let KubeResource::Pod(p) = item else {
-                return Row::new(vec![Cell::from(marker), Cell::from(item.name().to_owned())])
+                return Row::new(vec![Cell::from(marker), Cell::from(item.name())])
                     .height(1);
             };
 
@@ -67,46 +70,76 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 _ => Style::default().fg(COLOR_STATUS_ERROR),
             };
 
-            let marker_style = if app.selected_indices.contains(&idx) {
+            let marker_style = if selected {
                 Style::default().fg(COLOR_STATUS_RUNNING)
             } else {
                 STYLE_NORMAL
             };
 
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(marker).style(marker_style),
-                Cell::from(name.to_owned()),
+                Cell::from(name),
                 Cell::from(format!("{}/{}", ready_count, total_containers)),
-                Cell::from(phase.to_owned()).style(status_style),
+                Cell::from(phase).style(status_style),
                 Cell::from(restarts.to_string()),
                 Cell::from(age),
-            ])
-            .height(1)
+            ];
+            if wide {
+                let ip = status_obj
+                    .and_then(|s| s.pod_ip.as_deref())
+                    .unwrap_or("-");
+                let node = p
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.node_name.as_deref())
+                    .unwrap_or("-");
+                let images: String = p
+                    .spec
+                    .as_ref()
+                    .map(|s| {
+                        s.containers
+                            .iter()
+                            .map(|c| c.image.as_deref().unwrap_or("-"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                cells.push(Cell::from(ip));
+                cells.push(Cell::from(node));
+                cells.push(Cell::from(images));
+            }
+            Row::new(cells).height(1)
         })
         .collect();
 
-    let title = if app.selected_indices.is_empty() {
-        "Pods".to_string()
+    let title: std::borrow::Cow<'static, str> = if app.selected_indices.is_empty() {
+        "Pods".into()
     } else {
-        format!("Pods ({} selected)", app.selected_indices.len())
+        format!("Pods ({} selected)", app.selected_indices.len()).into()
     };
 
-    let t = Table::new(
-        rows,
-        [
+    let widths: &[Constraint] = if wide {
+        &[
             Constraint::Length(2),
             Constraint::Fill(1),
             Constraint::Length(8),
             Constraint::Length(12),
             Constraint::Length(10),
             Constraint::Length(8),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(title.clone()))
-    .row_highlight_style(STYLE_HIGHLIGHT)
-    .highlight_symbol("> ")
-    .highlight_spacing(HighlightSpacing::Always);
+            Constraint::Length(16),
+            Constraint::Fill(1),
+            Constraint::Fill(2),
+        ]
+    } else {
+        &[
+            Constraint::Length(2),
+            Constraint::Fill(1),
+            Constraint::Length(8),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(8),
+        ]
+    };
 
     if app.filtered_items.is_empty() && !app.is_loading {
         let msg = if app.last_error.is_some() {
@@ -121,6 +154,12 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             .block(Block::default().borders(Borders::ALL).title(title));
         f.render_widget(empty, area);
     } else {
+        let t = Table::new(rows, widths)
+            .header(header)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .row_highlight_style(STYLE_HIGHLIGHT)
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
         f.render_stateful_widget(t, area, &mut app.table_state);
     }
 }
