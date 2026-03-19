@@ -5,6 +5,28 @@ use k8s_openapi::api::{
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+impl SortDirection {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Asc => Self::Desc,
+            Self::Desc => Self::Asc,
+        }
+    }
+
+    pub fn indicator(self) -> &'static str {
+        match self {
+            Self::Asc => " ▲",
+            Self::Desc => " ▼",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     List,
     FilterInput,
@@ -33,6 +55,14 @@ impl ResourceType {
             Self::Pod => 0,
             Self::Deployment => 1,
             Self::Secret => 2,
+        }
+    }
+
+    pub fn sort_column_count(self) -> usize {
+        match self {
+            Self::Pod => 5,
+            Self::Deployment => 5,
+            Self::Secret => 4,
         }
     }
 }

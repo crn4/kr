@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::models::KubeResource;
+use crate::ui::components::build_sort_header;
 use crate::ui::theme::*;
 use ratatui::{
     Frame,
@@ -10,14 +11,17 @@ use ratatui::{
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let wide = app.wide_pods;
-    let cols: &[&str] = if wide {
+    let sort_col = app.active_sort_column();
+    let sort_ind = app.active_sort_direction().indicator();
+    let base: &[&str] = if wide {
         &["", "Name", "Ready", "Status", "Restarts", "Age", "IP", "Node", "Image"]
     } else {
         &["", "Name", "Ready", "Status", "Restarts", "Age"]
     };
+    let cols = build_sort_header(base, sort_col, sort_ind);
     let header_cells = cols
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(COLOR_HIGHLIGHT)));
+        .map(|h| Cell::from(h.as_ref()).style(Style::default().fg(COLOR_HIGHLIGHT)));
     let header = Row::new(header_cells)
         .style(STYLE_NORMAL)
         .height(1)
@@ -42,23 +46,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 .and_then(|s| s.phase.as_deref())
                 .unwrap_or_default();
 
-            let restarts: i32 = status_obj
-                .and_then(|s| {
-                    s.container_statuses
-                        .as_ref()
-                        .map(|c| c.iter().map(|cs| cs.restart_count).sum())
-                })
-                .unwrap_or(0);
-
-            let ready_count = status_obj
-                .and_then(|s| {
-                    s.container_statuses
-                        .as_ref()
-                        .map(|c| c.iter().filter(|cs| cs.ready).count())
-                })
-                .unwrap_or(0);
-
-            let total_containers = p.spec.as_ref().map(|s| s.containers.len()).unwrap_or(0);
+            let restarts = App::pod_restarts(p);
+            let ready_count = App::pod_ready_count(p);
+            let total_containers = App::pod_total_containers(p);
 
             let age = crate::utils::get_resource_age(p.metadata.creation_timestamp.as_ref());
 

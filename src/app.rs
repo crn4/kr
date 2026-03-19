@@ -1,4 +1,6 @@
-use crate::models::{AppMode, KubeResource, KubeResourceEvent, PendingAction, ResourceType};
+use crate::models::{
+    AppMode, KubeResource, KubeResourceEvent, PendingAction, ResourceType, SortDirection,
+};
 use crate::state::AppState;
 use k8s_openapi::api::{
     apps::v1::Deployment,
@@ -112,6 +114,9 @@ pub struct App {
     pub wide_pods: bool,
     pub wide_deployments: bool,
 
+    pub sort_column: [usize; 3],
+    pub sort_direction: [SortDirection; 3],
+
     pub app_state: AppState,
 }
 
@@ -188,10 +193,207 @@ impl App {
                 log_search_pending: false,
                 wide_pods: false,
                 wide_deployments: false,
+                sort_column: [0; 3],
+                sort_direction: [SortDirection::Asc; 3],
                 app_state: AppState::load(),
             },
             rx,
         ))
+    }
+
+    pub fn cycle_sort_column(&mut self) {
+        let tab = self.active_tab.index();
+        let max = self.active_tab.sort_column_count();
+        self.sort_column[tab] = (self.sort_column[tab] + 1) % max;
+        self.sort_direction[tab] = SortDirection::Asc;
+        self.apply_sort();
+        self.update_filter();
+        self.table_state.select(None);
+    }
+
+    pub fn toggle_sort_direction(&mut self) {
+        let tab = self.active_tab.index();
+        self.sort_direction[tab] = self.sort_direction[tab].toggle();
+        self.apply_sort();
+        self.update_filter();
+        self.table_state.select(None);
+    }
+
+    pub fn active_sort_column(&self) -> usize {
+        self.sort_column[self.active_tab.index()]
+    }
+
+    pub fn active_sort_direction(&self) -> SortDirection {
+        self.sort_direction[self.active_tab.index()]
+    }
+
+    fn apply_sort(&mut self) {
+        let col = self.active_sort_column();
+        let dir = self.active_sort_direction();
+        self.items.sort_unstable_by(|a, b| {
+            let ord = Self::compare_by_column(a, b, col)
+                .then_with(|| a.name().cmp(b.name()));
+            match dir {
+                SortDirection::Asc => ord,
+                SortDirection::Desc => ord.reverse(),
+            }
+        });
+    }
+
+    fn compare_by_column(
+        a: &KubeResource,
+        b: &KubeResource,
+        col: usize,
+    ) -> std::cmp::Ordering {
+        match a {
+            KubeResource::Pod(pa) => {
+                let KubeResource::Pod(pb) = b else {
+                    return std::cmp::Ordering::Equal;
+                };
+                Self::compare_pods(pa, pb, col)
+            }
+            KubeResource::Deployment(da) => {
+                let KubeResource::Deployment(db) = b else {
+                    return std::cmp::Ordering::Equal;
+                };
+                Self::compare_deployments(da, db, col)
+            }
+            KubeResource::Secret(sa) => {
+                let KubeResource::Secret(sb) = b else {
+                    return std::cmp::Ordering::Equal;
+                };
+                Self::compare_secrets(sa, sb, col)
+            }
+        }
+    }
+
+    fn compare_pods(
+        a: &Pod,
+        b: &Pod,
+        col: usize,
+    ) -> std::cmp::Ordering {
+        match col {
+            0 => {
+                let na = a.metadata.name.as_deref().unwrap_or_default();
+                let nb = b.metadata.name.as_deref().unwrap_or_default();
+                na.cmp(nb)
+            }
+            1 => {
+                let ra = (Self::pod_ready_count(a), Self::pod_total_containers(a));
+                let rb = (Self::pod_ready_count(b), Self::pod_total_containers(b));
+                ra.cmp(&rb)
+            }
+            2 => {
+                let sa = Self::pod_phase(a);
+                let sb = Self::pod_phase(b);
+                sa.cmp(sb)
+            }
+            3 => {
+                let ra = Self::pod_restarts(a);
+                let rb = Self::pod_restarts(b);
+                ra.cmp(&rb)
+            }
+            _ => Self::compare_creation_timestamp(
+                a.metadata.creation_timestamp.as_ref(),
+                b.metadata.creation_timestamp.as_ref(),
+            ),
+        }
+    }
+
+    fn compare_deployments(
+        a: &Deployment,
+        b: &Deployment,
+        col: usize,
+    ) -> std::cmp::Ordering {
+        match col {
+            0 => {
+                let na = a.metadata.name.as_deref().unwrap_or_default();
+                let nb = b.metadata.name.as_deref().unwrap_or_default();
+                na.cmp(nb)
+            }
+            1 => {
+                let ra = a.status.as_ref().map_or(0, |s| s.ready_replicas.unwrap_or(0));
+                let rb = b.status.as_ref().map_or(0, |s| s.ready_replicas.unwrap_or(0));
+                ra.cmp(&rb)
+            }
+            2 => {
+                let ua = a.status.as_ref().map_or(0, |s| s.updated_replicas.unwrap_or(0));
+                let ub = b.status.as_ref().map_or(0, |s| s.updated_replicas.unwrap_or(0));
+                ua.cmp(&ub)
+            }
+            3 => {
+                let aa = a.status.as_ref().map_or(0, |s| s.available_replicas.unwrap_or(0));
+                let ab = b.status.as_ref().map_or(0, |s| s.available_replicas.unwrap_or(0));
+                aa.cmp(&ab)
+            }
+            _ => Self::compare_creation_timestamp(
+                a.metadata.creation_timestamp.as_ref(),
+                b.metadata.creation_timestamp.as_ref(),
+            ),
+        }
+    }
+
+    fn compare_secrets(
+        a: &Secret,
+        b: &Secret,
+        col: usize,
+    ) -> std::cmp::Ordering {
+        match col {
+            0 => {
+                let na = a.metadata.name.as_deref().unwrap_or_default();
+                let nb = b.metadata.name.as_deref().unwrap_or_default();
+                na.cmp(nb)
+            }
+            1 => {
+                let ta = a.type_.as_deref().unwrap_or_default();
+                let tb = b.type_.as_deref().unwrap_or_default();
+                ta.cmp(tb)
+            }
+            2 => {
+                let da = a.data.as_ref().map_or(0, |d| d.len());
+                let db = b.data.as_ref().map_or(0, |d| d.len());
+                da.cmp(&db)
+            }
+            _ => Self::compare_creation_timestamp(
+                a.metadata.creation_timestamp.as_ref(),
+                b.metadata.creation_timestamp.as_ref(),
+            ),
+        }
+    }
+
+    fn compare_creation_timestamp(
+        a: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
+        b: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
+    ) -> std::cmp::Ordering {
+        let ta = a.map(|t| t.0);
+        let tb = b.map(|t| t.0);
+        ta.cmp(&tb)
+    }
+
+    pub(crate) fn pod_ready_count(p: &Pod) -> usize {
+        p.status
+            .as_ref()
+            .and_then(|s| {
+                s.container_statuses
+                    .as_ref()
+                    .map(|c| c.iter().filter(|cs| cs.ready).count())
+            })
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn pod_total_containers(p: &Pod) -> usize {
+        p.spec.as_ref().map(|s| s.containers.len()).unwrap_or(0)
+    }
+
+    pub(crate) fn pod_restarts(p: &Pod) -> i32 {
+        p.status
+            .as_ref()
+            .and_then(|s| {
+                s.container_statuses
+                    .as_ref()
+                    .map(|c| c.iter().map(|cs| cs.restart_count).sum())
+            })
+            .unwrap_or(0)
     }
 
     pub fn toggle_wide(&mut self) {
@@ -719,7 +921,7 @@ impl App {
                 }
             }
         }
-        self.items.sort_by(|a, b| a.name().cmp(b.name()));
+        self.apply_sort();
         self.update_filter();
     }
 
@@ -798,6 +1000,8 @@ impl App {
             log_search_pending: false,
             wide_pods: false,
             wide_deployments: false,
+            sort_column: [0; 3],
+            sort_direction: [SortDirection::Asc; 3],
             app_state: AppState::default(),
         }
     }
@@ -1480,5 +1684,193 @@ mod tests {
         app.log_search_next_with_height(20);
         assert_eq!(app.log_search_match_line, Some(20));
         assert!(!app.log_search_pending);
+    }
+
+    fn make_pod_with_phase(name: &str, phase: &str) -> KubeResource {
+        use k8s_openapi::api::core::v1::PodStatus;
+        let mut pod = Pod::default();
+        pod.metadata.name = Some(name.to_string());
+        pod.status = Some(PodStatus {
+            phase: Some(phase.to_string()),
+            ..Default::default()
+        });
+        KubeResource::Pod(Arc::new(pod))
+    }
+
+    fn make_pod_with_restarts(name: &str, restarts: i32) -> KubeResource {
+        use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
+        let mut pod = Pod::default();
+        pod.metadata.name = Some(name.to_string());
+        pod.status = Some(PodStatus {
+            container_statuses: Some(vec![ContainerStatus {
+                restart_count: restarts,
+                ready: false,
+                name: "main".to_string(),
+                image: "img".to_string(),
+                image_id: String::new(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        KubeResource::Pod(Arc::new(pod))
+    }
+
+    #[tokio::test]
+    async fn cycle_sort_column_wraps() {
+        let mut app = App::new_test();
+        assert_eq!(app.active_sort_column(), 0);
+        app.cycle_sort_column();
+        assert_eq!(app.active_sort_column(), 1);
+        app.cycle_sort_column();
+        assert_eq!(app.active_sort_column(), 2);
+        app.cycle_sort_column();
+        assert_eq!(app.active_sort_column(), 3);
+        app.cycle_sort_column();
+        assert_eq!(app.active_sort_column(), 4);
+        app.cycle_sort_column();
+        assert_eq!(app.active_sort_column(), 0);
+    }
+
+    #[tokio::test]
+    async fn cycle_sort_resets_direction_to_asc() {
+        let mut app = App::new_test();
+        app.toggle_sort_direction();
+        assert_eq!(app.active_sort_direction(), SortDirection::Desc);
+        app.cycle_sort_column();
+        assert_eq!(app.active_sort_direction(), SortDirection::Asc);
+    }
+
+    #[tokio::test]
+    async fn toggle_sort_direction_flips() {
+        let mut app = App::new_test();
+        assert_eq!(app.active_sort_direction(), SortDirection::Asc);
+        app.toggle_sort_direction();
+        assert_eq!(app.active_sort_direction(), SortDirection::Desc);
+        app.toggle_sort_direction();
+        assert_eq!(app.active_sort_direction(), SortDirection::Asc);
+    }
+
+    #[tokio::test]
+    async fn sort_per_tab_independent() {
+        let mut app = App::new_test();
+        app.cycle_sort_column();
+        assert_eq!(app.active_sort_column(), 1);
+
+        app.next_tab();
+        assert_eq!(app.active_sort_column(), 0);
+
+        app.prev_tab();
+        assert_eq!(app.active_sort_column(), 1);
+    }
+
+    #[tokio::test]
+    async fn sort_pods_by_name_desc() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("beta"), make_pod("alpha"), make_pod("gamma")];
+        app.toggle_sort_direction();
+        app.apply_sort();
+        app.update_filter();
+        assert_eq!(app.filtered_items[0].name(), "gamma");
+        assert_eq!(app.filtered_items[1].name(), "beta");
+        assert_eq!(app.filtered_items[2].name(), "alpha");
+    }
+
+    #[tokio::test]
+    async fn sort_pods_by_status() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_phase("c", "Running"),
+            make_pod_with_phase("a", "Pending"),
+            make_pod_with_phase("b", "Error"),
+        ];
+        app.sort_column[0] = 2;
+        app.apply_sort();
+        app.update_filter();
+        assert_eq!(app.filtered_items[0].name(), "b");
+        assert_eq!(app.filtered_items[1].name(), "a");
+        assert_eq!(app.filtered_items[2].name(), "c");
+    }
+
+    #[tokio::test]
+    async fn sort_pods_by_restarts() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_restarts("low", 1),
+            make_pod_with_restarts("high", 50),
+            make_pod_with_restarts("mid", 10),
+        ];
+        app.sort_column[0] = 3;
+        app.apply_sort();
+        app.update_filter();
+        assert_eq!(app.filtered_items[0].name(), "low");
+        assert_eq!(app.filtered_items[1].name(), "mid");
+        assert_eq!(app.filtered_items[2].name(), "high");
+    }
+
+    #[tokio::test]
+    async fn sort_secrets_by_data_count() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Secret;
+        app.items = vec![
+            make_secret("few", vec![("a", "1")]),
+            make_secret("many", vec![("a", "1"), ("b", "2"), ("c", "3")]),
+            make_secret("mid", vec![("a", "1"), ("b", "2")]),
+        ];
+        app.sort_column[2] = 2;
+        app.apply_sort();
+        app.update_filter();
+        assert_eq!(app.filtered_items[0].name(), "few");
+        assert_eq!(app.filtered_items[1].name(), "mid");
+        assert_eq!(app.filtered_items[2].name(), "many");
+    }
+
+    #[tokio::test]
+    async fn sort_preserved_after_filter() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("gamma"), make_pod("alpha"), make_pod("beta")];
+        app.toggle_sort_direction();
+        app.apply_sort();
+        app.filter_query = "ph".to_string();
+        app.update_filter();
+        assert_eq!(app.filtered_items.len(), 1);
+        assert_eq!(app.filtered_items[0].name(), "alpha");
+    }
+
+    #[tokio::test]
+    async fn sort_change_resets_selection() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("a"), make_pod("b"), make_pod("c")];
+        app.update_filter();
+        app.table_state.select(Some(1));
+
+        app.cycle_sort_column();
+        assert_eq!(app.table_state.selected(), None);
+    }
+
+    #[tokio::test]
+    async fn sort_direction_change_resets_selection() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("a"), make_pod("b"), make_pod("c")];
+        app.update_filter();
+        app.table_state.select(Some(2));
+
+        app.toggle_sort_direction();
+        assert_eq!(app.table_state.selected(), None);
+    }
+
+    #[tokio::test]
+    async fn sort_secondary_key_is_name() {
+        let mut app = App::new_test();
+        app.items = vec![
+            make_pod_with_phase("charlie", "Running"),
+            make_pod_with_phase("alpha", "Running"),
+            make_pod_with_phase("bravo", "Running"),
+        ];
+        app.sort_column[0] = 2;
+        app.apply_sort();
+        app.update_filter();
+        assert_eq!(app.filtered_items[0].name(), "alpha");
+        assert_eq!(app.filtered_items[1].name(), "bravo");
+        assert_eq!(app.filtered_items[2].name(), "charlie");
     }
 }

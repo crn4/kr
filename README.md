@@ -13,6 +13,8 @@ A fast, lightweight Kubernetes TUI built in Rust.
 - **Secret decoding** — view decoded secret values, copy to clipboard
 - **Deployment management** — scale replicas, rollout restart
 - **Multi-select** — bulk delete pods/deployments with Space and Ctrl+A
+- **Table sorting** — cycle sort columns with `o`, reverse with `O`
+- **Wide view** — toggle extended columns (IP, Node, Image, etc.) with `w`
 - **Fuzzy filter** — type `/` to filter resources by name
 - **Context & namespace switching** — switch clusters and namespaces without leaving the TUI
 - **Describe & edit** — `kubectl describe` and `kubectl edit` in embedded views
@@ -55,6 +57,9 @@ kr -c "get pods -n kube-system"
 | `g` / `G` | Jump to top / bottom |
 | `PgUp` / `PgDn` | Page scroll |
 | `/` | Filter by name |
+| `o` | Cycle sort column |
+| `O` | Toggle sort direction (asc/desc) |
+| `w` | Toggle wide view (Pods, Deployments) |
 | `Esc` | Clear filter / close modal / back |
 | `q` | Quit |
 

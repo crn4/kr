@@ -1,6 +1,6 @@
 use crate::app::App;
 use crate::models::KubeResource;
-use crate::ui::components::centered_rect;
+use crate::ui::components::{build_sort_header, centered_rect};
 use crate::ui::theme::*;
 use ratatui::{
     Frame,
@@ -10,9 +10,12 @@ use ratatui::{
 };
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
-    let header_cells = ["", "Name", "Type", "Data Count", "Age"]
+    let sort_col = app.active_sort_column();
+    let sort_ind = app.active_sort_direction().indicator();
+    let cols = build_sort_header(&["", "Name", "Type", "Data Count", "Age"], sort_col, sort_ind);
+    let header_cells = cols
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(COLOR_HIGHLIGHT)));
+        .map(|h| Cell::from(h.as_ref()).style(Style::default().fg(COLOR_HIGHLIGHT)));
     let header = Row::new(header_cells)
         .style(STYLE_NORMAL)
         .height(1)

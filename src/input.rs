@@ -395,6 +395,13 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             app.toggle_wide();
         }
 
+        KeyCode::Char('o') => {
+            app.cycle_sort_column();
+        }
+        KeyCode::Char('O') => {
+            app.toggle_sort_direction();
+        }
+
         KeyCode::Char('l') if app.active_tab == ResourceType::Pod => {
             if let Some(pod) = app.get_selected_resource() {
                 let name = pod.name().to_owned();
@@ -1846,5 +1853,46 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Char('w')));
         assert!(!app.wide_pods);
         assert!(!app.wide_deployments);
+    }
+
+    #[tokio::test]
+    async fn o_cycles_sort_column() {
+        let mut app = App::new_test();
+        app.filtered_items = vec![make_pod("a")];
+        assert_eq!(app.active_sort_column(), 0);
+
+        handle_input(&mut app, key(KeyCode::Char('o')));
+        assert_eq!(app.active_sort_column(), 1);
+
+        handle_input(&mut app, key(KeyCode::Char('o')));
+        assert_eq!(app.active_sort_column(), 2);
+    }
+
+    #[tokio::test]
+    async fn shift_o_toggles_sort_direction() {
+        use crate::models::SortDirection;
+        let mut app = App::new_test();
+        app.filtered_items = vec![make_pod("a")];
+        assert_eq!(app.active_sort_direction(), SortDirection::Asc);
+
+        handle_input(&mut app, key(KeyCode::Char('O')));
+        assert_eq!(app.active_sort_direction(), SortDirection::Desc);
+
+        handle_input(&mut app, key(KeyCode::Char('O')));
+        assert_eq!(app.active_sort_direction(), SortDirection::Asc);
+    }
+
+    #[tokio::test]
+    async fn o_resets_direction_on_column_change() {
+        use crate::models::SortDirection;
+        let mut app = App::new_test();
+        app.filtered_items = vec![make_pod("a")];
+
+        handle_input(&mut app, key(KeyCode::Char('O')));
+        assert_eq!(app.active_sort_direction(), SortDirection::Desc);
+
+        handle_input(&mut app, key(KeyCode::Char('o')));
+        assert_eq!(app.active_sort_direction(), SortDirection::Asc);
+        assert_eq!(app.active_sort_column(), 1);
     }
 }
