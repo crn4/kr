@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::models::KubeResource;
+use crate::ui::components::build_sort_header;
 use crate::ui::theme::*;
 use ratatui::{
     Frame,
@@ -10,14 +11,17 @@ use ratatui::{
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let wide = app.wide_deployments;
-    let cols: &[&str] = if wide {
+    let sort_col = app.active_sort_column();
+    let sort_ind = app.active_sort_direction().indicator();
+    let base: &[&str] = if wide {
         &["", "Name", "Ready", "Up-to-date", "Available", "Age", "Strategy", "Images"]
     } else {
         &["", "Name", "Ready", "Up-to-date", "Available", "Age"]
     };
+    let cols = build_sort_header(base, sort_col, sort_ind);
     let header_cells = cols
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(COLOR_HIGHLIGHT)));
+        .map(|h| Cell::from(h.as_ref()).style(Style::default().fg(COLOR_HIGHLIGHT)));
 
     let header = Row::new(header_cells)
         .style(STYLE_NORMAL)
@@ -98,7 +102,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Fill(1),
             Constraint::Length(10),
             Constraint::Length(12),
-            Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(8),
             Constraint::Length(14),
             Constraint::Fill(2),
@@ -109,7 +113,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Fill(1),
             Constraint::Length(10),
             Constraint::Length(12),
-            Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(8),
         ]
     };
