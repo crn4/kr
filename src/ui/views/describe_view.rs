@@ -18,7 +18,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let scroll = (app.describe_scroll as u16).min(total_lines.saturating_sub(visible_height));
 
-    let title = format!("Describe [{} lines]", app.describe_content.len(),);
+    let title = format!("Describe [{} lines]", app.describe_content.len());
 
     let paragraph = Paragraph::new(lines)
         .block(
@@ -28,7 +28,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .style(STYLE_NORMAL),
         )
         .style(STYLE_NORMAL)
-        .scroll((scroll, 0));
+        .scroll((scroll, app.describe_hscroll as u16));
 
     f.render_widget(paragraph, area);
 }

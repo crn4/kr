@@ -180,6 +180,7 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         KubeResourceEvent::DescribeReady(lines) => {
             app.describe_content = lines;
             app.describe_scroll = 0;
+            app.describe_hscroll = 0;
             app.mode = AppMode::DescribeView;
         }
         KubeResourceEvent::NamespacesLoaded(namespaces) => {
@@ -568,4 +569,5 @@ mod tests {
         let third = tagged.next().await;
         assert!(third.is_none());
     }
+
 }
