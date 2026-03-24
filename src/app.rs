@@ -87,6 +87,7 @@ pub struct App {
 
     pub describe_content: Vec<String>,
     pub describe_scroll: usize,
+    pub describe_hscroll: usize,
 
     pub shell_session: Option<ShellSession>,
     pub shell_title: String,
@@ -173,6 +174,7 @@ impl App {
                 pending_action: None,
                 describe_content: Vec::new(),
                 describe_scroll: 0,
+                describe_hscroll: 0,
                 shell_session: None,
                 shell_title: String::new(),
                 clipboard_clear_task: None,
@@ -980,6 +982,7 @@ impl App {
             pending_action: None,
             describe_content: Vec::new(),
             describe_scroll: 0,
+            describe_hscroll: 0,
             shell_session: None,
             shell_title: String::new(),
             clipboard_clear_task: None,

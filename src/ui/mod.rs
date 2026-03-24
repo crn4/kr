@@ -178,7 +178,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         AppMode::LogSearchInput => "Type to search | Enter:Confirm | Esc:Cancel",
         AppMode::ScaleInput => "Enter replica count | Enter:Confirm | Esc:Cancel",
         AppMode::Confirm => "y:Confirm | n/Esc:Cancel",
-        AppMode::DescribeView => "j/k:Scroll | PgUp/PgDn | g/G:Top/Bottom | q/Esc:Close",
+        AppMode::DescribeView => "j/k:Scroll h/l:Pan | PgUp/PgDn | g/G:Top/Bottom 0:Left | q/Esc:Close",
         AppMode::ShellView => if app.shell_title.starts_with("Edit") {
             "Ctrl+Q:Close editor"
         } else {

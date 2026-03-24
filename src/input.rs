@@ -621,6 +621,18 @@ fn describe_max_scroll(app: &App) -> usize {
     app.describe_content.len().saturating_sub(visible)
 }
 
+fn describe_max_hscroll(app: &App) -> usize {
+    let visible_width = crossterm::terminal::size()
+        .map(|(w, _)| ((w as usize) * 90 / 100).saturating_sub(2))
+        .unwrap_or(78);
+    app.describe_content
+        .iter()
+        .map(|l| l.len())
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(visible_width)
+}
+
 fn handle_describe_input(app: &mut App, key: KeyEvent) {
     let page_size = crossterm::terminal::size()
         .map(|(_, h)| ((h as usize) * 90 / 100).saturating_sub(2))
@@ -629,6 +641,7 @@ fn handle_describe_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.describe_content.clear();
+            app.describe_hscroll = 0;
             app.mode = AppMode::List;
         }
         KeyCode::Char('j') | KeyCode::Down => {
@@ -652,6 +665,16 @@ fn handle_describe_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('g') => {
             app.describe_scroll = 0;
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            let max = describe_max_hscroll(app);
+            app.describe_hscroll = app.describe_hscroll.saturating_add(4).min(max);
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            app.describe_hscroll = app.describe_hscroll.saturating_sub(4);
+        }
+        KeyCode::Char('0') => {
+            app.describe_hscroll = 0;
         }
         _ => {}
     }
@@ -1894,5 +1917,64 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Char('o')));
         assert_eq!(app.active_sort_direction(), SortDirection::Asc);
         assert_eq!(app.active_sort_column(), 1);
+    }
+
+    #[tokio::test]
+    async fn describe_hscroll_l_increases() {
+        let mut app = App::new_test();
+        app.mode = AppMode::DescribeView;
+        app.describe_content = vec!["x".repeat(300)];
+        handle_input(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.describe_hscroll, 4);
+        handle_input(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.describe_hscroll, 8);
+    }
+
+    #[tokio::test]
+    async fn describe_hscroll_h_decreases() {
+        let mut app = App::new_test();
+        app.mode = AppMode::DescribeView;
+        app.describe_content = vec!["long line".to_string()];
+        app.describe_hscroll = 8;
+        handle_input(&mut app, key(KeyCode::Char('h')));
+        assert_eq!(app.describe_hscroll, 4);
+        handle_input(&mut app, key(KeyCode::Char('h')));
+        assert_eq!(app.describe_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn describe_hscroll_h_saturates_at_zero() {
+        let mut app = App::new_test();
+        app.mode = AppMode::DescribeView;
+        app.describe_content = vec!["line".to_string()];
+        handle_input(&mut app, key(KeyCode::Char('h')));
+        assert_eq!(app.describe_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn describe_hscroll_l_clamps_at_max() {
+        let mut app = App::new_test();
+        app.mode = AppMode::DescribeView;
+        app.describe_content = vec!["short".to_string()];
+        handle_input(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.describe_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn describe_hscroll_zero_resets() {
+        let mut app = App::new_test();
+        app.mode = AppMode::DescribeView;
+        app.describe_content = vec!["line".to_string()];
+        app.describe_hscroll = 12;
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        assert_eq!(app.describe_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn describe_hscroll_empty_content_stays_zero() {
+        let mut app = App::new_test();
+        app.mode = AppMode::DescribeView;
+        handle_input(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.describe_hscroll, 0);
     }
 }
