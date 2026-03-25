@@ -174,7 +174,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         },
         AppMode::FilterInput => "Type to filter | Esc:Cancel | Enter:Confirm",
         AppMode::SecretDecode => "j/k:Scroll | r:Reveal | c:Copy | q/Esc:Close",
-        AppMode::LogView => "j/k:Scroll | PgUp/PgDn | g/G:Top/Follow | /:Search n/N:Next/Prev | q/Esc:Back",
+        AppMode::LogView => "j/k:Scroll h/l:Pan | PgUp/PgDn | g/G:Top/Follow 0:Left | /:Search n/N:Next/Prev | q/Esc:Back",
         AppMode::LogSearchInput => "Type to search | Enter:Confirm | Esc:Cancel",
         AppMode::ScaleInput => "Enter replica count | Enter:Confirm | Esc:Cancel",
         AppMode::Confirm => "y:Confirm | n/Esc:Cancel",

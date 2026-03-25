@@ -107,6 +107,7 @@ pub struct App {
     pub status_filter_selected: HashSet<usize>,
     pub status_filter_state: ListState,
 
+    pub log_hscroll: usize,
     pub log_search_query: String,
     pub log_search_input: String,
     pub log_search_match_line: Option<usize>,
@@ -189,6 +190,7 @@ impl App {
                 status_filter_items: Vec::new(),
                 status_filter_selected: HashSet::new(),
                 status_filter_state: ListState::default(),
+                log_hscroll: 0,
                 log_search_query: String::new(),
                 log_search_input: String::new(),
                 log_search_match_line: None,
@@ -470,6 +472,7 @@ impl App {
         self.log_loading_history = false;
         self.log_generation += 1;
         self.log_history_exhausted = false;
+        self.log_hscroll = 0;
         self.log_search_query.clear();
         self.log_search_input.clear();
         self.log_search_match_line = None;
@@ -997,6 +1000,7 @@ impl App {
             status_filter_items: Vec::new(),
             status_filter_selected: HashSet::new(),
             status_filter_state: ListState::default(),
+            log_hscroll: 0,
             log_search_query: String::new(),
             log_search_input: String::new(),
             log_search_match_line: None,

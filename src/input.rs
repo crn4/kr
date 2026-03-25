@@ -185,6 +185,18 @@ fn log_max_scroll(app: &App) -> usize {
     app.log_buffer.len().saturating_sub(visible)
 }
 
+fn log_max_hscroll(app: &App) -> usize {
+    let visible_width = crossterm::terminal::size()
+        .map(|(w, _)| (w as usize).saturating_sub(2))
+        .unwrap_or(78);
+    app.log_buffer
+        .iter()
+        .map(|l| l.len())
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(visible_width)
+}
+
 fn handle_log_input(app: &mut App, key: KeyEvent) {
     let page_size = crossterm::terminal::size()
         .map(|(_, h)| (h as usize).saturating_sub(LOG_CHROME_LINES))
@@ -266,6 +278,16 @@ fn handle_log_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('g') => {
             app.log_scroll_offset = Some(0);
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            let max = log_max_hscroll(app);
+            app.log_hscroll = app.log_hscroll.saturating_add(4).min(max);
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            app.log_hscroll = app.log_hscroll.saturating_sub(4);
+        }
+        KeyCode::Char('0') => {
+            app.log_hscroll = 0;
         }
         _ => {}
     }
@@ -1976,5 +1998,54 @@ mod tests {
         app.mode = AppMode::DescribeView;
         handle_input(&mut app, key(KeyCode::Char('l')));
         assert_eq!(app.describe_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn log_hscroll_l_increases() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_buffer.push_back("x".repeat(300));
+        handle_input(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.log_hscroll, 4);
+        handle_input(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.log_hscroll, 8);
+    }
+
+    #[tokio::test]
+    async fn log_hscroll_h_decreases() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_buffer.push_back("x".repeat(300));
+        app.log_hscroll = 8;
+        handle_input(&mut app, key(KeyCode::Char('h')));
+        assert_eq!(app.log_hscroll, 4);
+        handle_input(&mut app, key(KeyCode::Char('h')));
+        assert_eq!(app.log_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn log_hscroll_h_saturates_at_zero() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        handle_input(&mut app, key(KeyCode::Char('h')));
+        assert_eq!(app.log_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn log_hscroll_l_clamps_at_max() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_buffer.push_back("short".to_string());
+        handle_input(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.log_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn log_hscroll_zero_resets() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.log_hscroll = 12;
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        assert_eq!(app.log_hscroll, 0);
     }
 }

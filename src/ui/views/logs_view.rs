@@ -91,7 +91,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .style(STYLE_NORMAL);
+        .style(STYLE_NORMAL)
+        .scroll((0, app.log_hscroll as u16));
 
     f.render_widget(paragraph, area);
 }
