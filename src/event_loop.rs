@@ -307,6 +307,15 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
         } else if app.active_tab != current_tab {
             current_tab = app.active_tab;
 
+            if app
+                .last_error
+                .as_ref()
+                .is_some_and(|e| e.starts_with("Access denied"))
+            {
+                app.last_error = None;
+                app.message_time = None;
+            }
+
             ensure_watcher(&mut app, current_tab, &mut watchers, &mut watcher_active);
             app.refresh_items();
             app.dirty = true;
