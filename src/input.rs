@@ -315,6 +315,21 @@ fn handle_log_search_input(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn collect_selected_names(app: &App) -> Vec<String> {
+    if app.selected_indices.is_empty() {
+        app.get_selected_resource()
+            .map(|r| vec![r.name().to_string()])
+            .unwrap_or_default()
+    } else {
+        let mut indices: Vec<usize> = app.selected_indices.iter().copied().collect();
+        indices.sort_unstable();
+        indices
+            .iter()
+            .filter_map(|&i| app.filtered_items.get(i).map(|r| r.name().to_string()))
+            .collect()
+    }
+}
+
 fn handle_global_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
@@ -446,22 +461,9 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             if app.active_tab == ResourceType::Pod
                 || app.active_tab == ResourceType::Deployment =>
         {
-            let (count, names): (usize, Vec<String>) = if app.selected_indices.is_empty() {
-                if let Some(r) = app.get_selected_resource() {
-                    (1, vec![r.name().to_string()])
-                } else {
-                    (0, vec![])
-                }
-            } else {
-                let mut indices: Vec<usize> = app.selected_indices.iter().copied().collect();
-                indices.sort_unstable();
-                let names: Vec<String> = indices
-                    .iter()
-                    .filter_map(|&i| app.filtered_items.get(i).map(|r| r.name().to_string()))
-                    .collect();
-                (names.len(), names)
-            };
-            if count > 0 {
+            let names = collect_selected_names(app);
+            if !names.is_empty() {
+                let count = names.len();
                 let kind = match app.active_tab {
                     ResourceType::Pod => "pod(s)",
                     ResourceType::Deployment => "deployment(s)",
@@ -483,9 +485,9 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('r') if app.active_tab == ResourceType::Deployment => {
-            if let Some(res) = app.get_selected_resource() {
-                let name = res.name().to_string();
-                app.pending_action = Some(PendingAction::RestartDeployment { name });
+            let names = collect_selected_names(app);
+            if !names.is_empty() {
+                app.pending_action = Some(PendingAction::RestartDeployment { names });
                 app.mode = AppMode::Confirm;
             } else {
                 app.set_error("No deployment selected".to_string());
@@ -920,22 +922,24 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                             }
                         }
                     }
-                    PendingAction::RestartDeployment { name } => {
-                        let client = app.client.clone();
-                        let ns = app.current_namespace.clone();
-                        let tx = app.event_tx.clone();
-                        tokio::spawn(async move {
-                            let result =
-                                crate::k8s::actions::rollout_restart(client, &ns, &name).await;
-                            let _ = tx.send(match result {
-                                Ok(()) => {
-                                    KubeResourceEvent::Success(format!("Rollout restart: '{name}'"))
-                                }
-                                Err(e) => KubeResourceEvent::Error(format!(
-                                    "Restart '{name}' failed: {e}"
-                                )),
+                    PendingAction::RestartDeployment { names } => {
+                        for name in names {
+                            let client = app.client.clone();
+                            let ns = app.current_namespace.clone();
+                            let tx = app.event_tx.clone();
+                            tokio::spawn(async move {
+                                let result =
+                                    crate::k8s::actions::rollout_restart(client, &ns, &name).await;
+                                let _ = tx.send(match result {
+                                    Ok(()) => KubeResourceEvent::Success(format!(
+                                        "Rollout restart: '{name}'"
+                                    )),
+                                    Err(e) => KubeResourceEvent::Error(format!(
+                                        "Restart '{name}' failed: {e}"
+                                    )),
+                                });
                             });
-                        });
+                        }
                     }
                     PendingAction::ScaleDeployment { name, replicas } => {
                         let client = app.client.clone();
@@ -1005,7 +1009,7 @@ mod tests {
     use crate::app::App;
     use crate::models::{AppMode, KubeResource, PendingAction, ResourceType};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use k8s_openapi::api::core::v1::Pod;
+    use k8s_openapi::api::{apps::v1::Deployment, core::v1::Pod};
     use std::sync::Arc;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1030,6 +1034,12 @@ mod tests {
         let mut pod = Pod::default();
         pod.metadata.name = Some(name.to_string());
         KubeResource::Pod(Arc::new(pod))
+    }
+
+    fn make_deployment(name: &str) -> KubeResource {
+        let mut dep = Deployment::default();
+        dep.metadata.name = Some(name.to_string());
+        KubeResource::Deployment(Arc::new(dep))
     }
 
     #[tokio::test]
@@ -2047,5 +2057,62 @@ mod tests {
         app.log_hscroll = 12;
         handle_input(&mut app, key(KeyCode::Char('0')));
         assert_eq!(app.log_hscroll, 0);
+    }
+
+    #[tokio::test]
+    async fn restart_single_deployment() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web")];
+        app.table_state.select(Some(0));
+        handle_input(&mut app, key(KeyCode::Char('r')));
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::RestartDeployment {
+                names: vec!["web".into()]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_multi_select_deployments() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![
+            make_deployment("web"),
+            make_deployment("api"),
+            make_deployment("worker"),
+        ];
+        app.selected_indices.insert(0);
+        app.selected_indices.insert(2);
+        handle_input(&mut app, key(KeyCode::Char('r')));
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::RestartDeployment {
+                names: vec!["web".into(), "worker".into()]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_no_deployment_selected() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        handle_input(&mut app, key(KeyCode::Char('r')));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn restart_ignored_on_pod_tab() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("nginx")];
+        app.table_state.select(Some(0));
+        handle_input(&mut app, key(KeyCode::Char('r')));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.pending_action.is_none());
     }
 }

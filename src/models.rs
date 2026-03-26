@@ -114,7 +114,7 @@ pub enum PendingAction {
         names: Vec<String>,
     },
     RestartDeployment {
-        name: String,
+        names: Vec<String>,
     },
     ScaleDeployment {
         name: String,
@@ -136,8 +136,19 @@ impl PendingAction {
                     format!("Delete {} {}?\n{}", count, kind, names.join(", "))
                 }
             }
-            Self::RestartDeployment { name } => {
-                format!("Rollout restart '{}'?", name)
+            Self::RestartDeployment { names } => {
+                if names.len() == 1 {
+                    format!(
+                        "Rollout restart '{}'?",
+                        names.first().map(|s| s.as_str()).unwrap_or("?")
+                    )
+                } else {
+                    format!(
+                        "Rollout restart {} deployments?\n{}",
+                        names.len(),
+                        names.join(", ")
+                    )
+                }
             }
             Self::ScaleDeployment { name, replicas } => {
                 if *replicas == 0 {
