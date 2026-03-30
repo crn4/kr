@@ -555,6 +555,17 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
 
+        KeyCode::Enter if app.active_tab == ResourceType::Deployment => {
+            if let Some(res) = app.get_selected_resource() {
+                let name = res.name();
+                if !name.is_empty() {
+                    app.filter_query = name.to_owned();
+                    app.active_tab = ResourceType::Pod;
+                    app.reset_tab_state();
+                }
+            }
+        }
+
         KeyCode::Enter | KeyCode::Char('x') if app.active_tab == ResourceType::Secret => {
             app.decode_selected_secret();
             if app.selected_secret_decoded.is_some() {
@@ -2114,5 +2125,42 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Char('r')));
         assert_eq!(app.mode, AppMode::List);
         assert!(app.pending_action.is_none());
+    }
+
+    #[tokio::test]
+    async fn enter_on_deployment_switches_to_pods_with_filter() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("catalog-backend-appliances")];
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.active_tab, ResourceType::Pod);
+        assert_eq!(app.filter_query, "catalog-backend-appliances");
+        assert_eq!(app.table_state.selected(), None);
+        assert!(app.selected_indices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enter_on_deployment_no_selection_is_noop() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("nginx")];
+
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.active_tab, ResourceType::Deployment);
+        assert!(app.filter_query.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enter_on_pod_tab_is_noop() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("nginx-abc-123")];
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.active_tab, ResourceType::Pod);
+        assert!(app.filter_query.is_empty());
     }
 }

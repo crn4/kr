@@ -426,7 +426,7 @@ impl App {
         self.reset_tab_state();
     }
 
-    fn reset_tab_state(&mut self) {
+    pub(crate) fn reset_tab_state(&mut self) {
         self.table_state.select(None);
         self.selected_indices.clear();
         self.status_filter.clear();
