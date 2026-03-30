@@ -87,6 +87,7 @@ kr -c "get pods -n kube-system"
 
 | Key | Action |
 |-----|--------|
+| `Enter` | Show deployment's pods (filtered) |
 | `S` | Scale replicas |
 | `r` | Rollout restart |
 | `d` | Describe |
