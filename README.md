@@ -10,6 +10,7 @@ A fast, lightweight Kubernetes TUI built in Rust.
 - **Real-time updates** — watches resources via Kubernetes API (no polling)
 - **Pod logs** — streaming log view with auto-follow, manual scroll and search
 - **Shell access** — embedded interactive shell sessions inside pods
+- **Port forwarding** — forward local ports to pods, manage multiple forwards with `p` / `P`
 - **Secret decoding** — view decoded secret values, copy to clipboard
 - **Deployment management** — scale replicas, rollout restart
 - **Multi-select** — bulk delete pods/deployments with Space and Ctrl+A
@@ -61,6 +62,7 @@ kr -c "get pods -n kube-system"
 | `O` | Toggle sort direction (asc/desc) |
 | `w` | Toggle wide view (Pods, Deployments) |
 | `?` | Show context-aware help popup |
+| `P` | Manage active port forwards |
 | `Esc` | Clear filter / close modal / back |
 | `q` | Quit |
 
@@ -77,6 +79,7 @@ kr -c "get pods -n kube-system"
 |-----|--------|
 | `l` | Stream logs |
 | `s` | Open shell |
+| `p` | Port forward (`8080:80` or `80`) |
 | `d` | Describe |
 | `e` | Edit |
 | `f` | Filter by pod's status |
@@ -120,6 +123,14 @@ kr -c "get pods -n kube-system"
 |-----|--------|
 | `Ctrl+Q` | Close shell session |
 | All other keys | Forwarded to the shell |
+
+### Port Forward List
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate |
+| `d` / `Delete` | Stop selected forward |
+| `Esc` | Close |
 
 ## Requirements
 
