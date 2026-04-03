@@ -16,6 +16,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         AppMode::ShellView => handle_shell_input(app, key),
         AppMode::DescribeView => handle_describe_input(app, key),
         AppMode::StatusFilter => handle_status_filter_input(app, key),
+        AppMode::Help => handle_help_input(app, key),
         AppMode::List => handle_global_input(app, key),
     }
 }
@@ -217,6 +218,11 @@ fn handle_log_input(app: &mut App, key: KeyEvent) {
                 app.mode = AppMode::List;
             }
         }
+        KeyCode::Char('?') => {
+            app.help_return_mode = AppMode::LogView;
+            app.help_scroll = 0;
+            app.mode = AppMode::Help;
+        }
         KeyCode::Char('/') => {
             app.log_search_input.clone_from(&app.log_search_query);
             app.mode = AppMode::LogSearchInput;
@@ -330,9 +336,39 @@ fn collect_selected_names(app: &App) -> Vec<String> {
     }
 }
 
+fn handle_help_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+            app.mode = app.help_return_mode;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            let max = crate::ui::views::help_view::max_scroll(app);
+            if app.help_scroll < max {
+                app.help_scroll += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.help_scroll = app.help_scroll.saturating_sub(1);
+        }
+        KeyCode::PageDown => {
+            let max = crate::ui::views::help_view::max_scroll(app);
+            app.help_scroll = (app.help_scroll + 10).min(max);
+        }
+        KeyCode::PageUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(10);
+        }
+        _ => {}
+    }
+}
+
 fn handle_global_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('?') => {
+            app.help_return_mode = AppMode::List;
+            app.help_scroll = 0;
+            app.mode = AppMode::Help;
+        }
         KeyCode::Tab => app.next_tab(),
         KeyCode::BackTab => app.prev_tab(),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -610,6 +646,11 @@ fn handle_secret_modal_input(app: &mut App, key: KeyEvent) {
             app.mode = AppMode::List;
             app.selected_secret_decoded = None;
         }
+        KeyCode::Char('?') => {
+            app.help_return_mode = AppMode::SecretDecode;
+            app.help_scroll = 0;
+            app.mode = AppMode::Help;
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             if let Some(decoded) = &app.selected_secret_decoded
                 && app.secret_scroll < decoded.len().saturating_sub(1)
@@ -678,6 +719,11 @@ fn handle_describe_input(app: &mut App, key: KeyEvent) {
             app.describe_content.clear();
             app.describe_hscroll = 0;
             app.mode = AppMode::List;
+        }
+        KeyCode::Char('?') => {
+            app.help_return_mode = AppMode::DescribeView;
+            app.help_scroll = 0;
+            app.mode = AppMode::Help;
         }
         KeyCode::Char('j') | KeyCode::Down => {
             let max = describe_max_scroll(app);
@@ -2162,5 +2208,124 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Enter));
         assert_eq!(app.active_tab, ResourceType::Pod);
         assert!(app.filter_query.is_empty());
+    }
+
+    #[tokio::test]
+    async fn question_mark_opens_help_from_list() {
+        let mut app = App::new_test();
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.help_return_mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn esc_closes_help_returns_to_list() {
+        let mut app = App::new_test();
+        app.mode = AppMode::Help;
+        app.help_return_mode = AppMode::List;
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn question_mark_closes_help() {
+        let mut app = App::new_test();
+        app.mode = AppMode::Help;
+        app.help_return_mode = AppMode::LogView;
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::LogView);
+    }
+
+    #[tokio::test]
+    async fn question_mark_opens_help_from_log_view() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.help_return_mode, AppMode::LogView);
+    }
+
+    #[tokio::test]
+    async fn question_mark_opens_help_from_describe() {
+        let mut app = App::new_test();
+        app.mode = AppMode::DescribeView;
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.help_return_mode, AppMode::DescribeView);
+    }
+
+    #[tokio::test]
+    async fn question_mark_opens_help_from_secret_decode() {
+        let mut app = App::new_test();
+        app.mode = AppMode::SecretDecode;
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.help_return_mode, AppMode::SecretDecode);
+    }
+
+    #[tokio::test]
+    async fn question_mark_in_filter_input_appends_char() {
+        let mut app = App::new_test();
+        app.mode = AppMode::FilterInput;
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::FilterInput);
+        assert_eq!(app.filter_query, "?");
+    }
+
+    #[tokio::test]
+    async fn q_closes_help() {
+        let mut app = App::new_test();
+        app.mode = AppMode::Help;
+        app.help_return_mode = AppMode::List;
+        handle_input(&mut app, key(KeyCode::Char('q')));
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn help_round_trip_from_describe() {
+        let mut app = App::new_test();
+        app.mode = AppMode::DescribeView;
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::Help);
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::DescribeView);
+    }
+
+    #[tokio::test]
+    async fn help_round_trip_from_secret_decode() {
+        let mut app = App::new_test();
+        app.mode = AppMode::SecretDecode;
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::Help);
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::SecretDecode);
+    }
+
+    #[tokio::test]
+    async fn help_scroll_resets_on_open() {
+        let mut app = App::new_test();
+        app.help_scroll = 5;
+        handle_input(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn help_j_scrolls_down() {
+        let mut app = App::new_test();
+        app.mode = AppMode::Help;
+        app.help_return_mode = AppMode::List;
+        handle_input(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.mode, AppMode::Help);
+    }
+
+    #[tokio::test]
+    async fn help_k_scrolls_up_saturates_at_zero() {
+        let mut app = App::new_test();
+        app.mode = AppMode::Help;
+        app.help_return_mode = AppMode::List;
+        app.help_scroll = 0;
+        handle_input(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.help_scroll, 0);
     }
 }

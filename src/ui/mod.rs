@@ -38,6 +38,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::Confirm => draw_confirm(f, app),
         AppMode::ShellView => shell_view::draw(f, app),
         AppMode::DescribeView => describe_view::draw(f, app),
+        AppMode::Help => help_view::draw(f, app),
         _ => {}
     }
 }
@@ -156,45 +157,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(p, area);
         return;
     }
-    let help = match app.mode {
-        AppMode::List => match app.active_tab {
-            ResourceType::Pod => if app.wide_pods {
-                "q:Quit /:Filter f:Status j/k:Nav g/G:Top/End o/O:Sort Space:Sel ^a:All Tab:Next w:Compact l:Logs s:Shell D:Del d:Desc e:Edit c:Ctx n:NS"
-            } else {
-                "q:Quit /:Filter f:Status j/k:Nav g/G:Top/End o/O:Sort Space:Sel ^a:All Tab:Next w:Wide l:Logs s:Shell D:Del d:Desc e:Edit c:Ctx n:NS"
-            },
-            ResourceType::Deployment => if app.wide_deployments {
-                "q:Quit /:Filter j/k:Nav g/G:Top/End o/O:Sort PgUp/PgDn Space:Sel ^a:All Tab:Next w:Compact S:Scale r:Restart D:Del d:Desc e:Edit c:Ctx n:NS"
-            } else {
-                "q:Quit /:Filter j/k:Nav g/G:Top/End o/O:Sort PgUp/PgDn Space:Sel ^a:All Tab:Next w:Wide S:Scale r:Restart D:Del d:Desc e:Edit c:Ctx n:NS"
-            },
-            ResourceType::Secret => {
-                "q:Quit /:Filter j/k:Nav g/G:Top/End o/O:Sort PgUp/PgDn Tab:Next Enter/x:Decode c:Ctx n:NS"
-            }
-        },
-        AppMode::FilterInput => "Type to filter | Esc:Cancel | Enter:Confirm",
-        AppMode::SecretDecode => "j/k:Scroll | r:Reveal | c:Copy | q/Esc:Close",
-        AppMode::LogView => "j/k:Scroll h/l:Pan | PgUp/PgDn | g/G:Top/Follow 0:Left | /:Search n/N:Next/Prev | q/Esc:Back",
-        AppMode::LogSearchInput => "Type to search | Enter:Confirm | Esc:Cancel",
-        AppMode::ScaleInput => "Enter replica count | Enter:Confirm | Esc:Cancel",
-        AppMode::Confirm => "y:Confirm | n/Esc:Cancel",
-        AppMode::DescribeView => "j/k:Scroll h/l:Pan | PgUp/PgDn | g/G:Top/Bottom 0:Left | q/Esc:Close",
-        AppMode::ShellView => if app.shell_title.starts_with("Edit") {
-            "Ctrl+Q:Close editor"
-        } else {
-            "Ctrl+Q:Close shell"
-        },
-        AppMode::StatusFilter => "j/k:Nav | Space:Toggle | a:All | Enter:Apply | Esc:Cancel",
-        AppMode::ContextSelect => "j/k:Nav | Enter:Select | Esc:Cancel",
-        AppMode::NamespaceSelect => {
-            if app.namespace_typing {
-                "Type namespace | Up/Down:Nav | Enter:Select | Esc:Back"
-            } else {
-                "j/k:Nav | /:Search | Enter:Select | Esc:Cancel"
-            }
-        }
+    let hint = match app.mode {
+        AppMode::FilterInput => " Type to filter | Enter:Confirm | Esc:Cancel",
+        AppMode::LogSearchInput => " Type to search | Enter:Confirm | Esc:Cancel",
+        AppMode::ScaleInput => " Replicas (0-1000) | Enter:Confirm | Esc:Cancel",
+        AppMode::Confirm => " y:Confirm | n/Esc:Cancel",
+        AppMode::LogView => " q:Back  /:Search  ?:Help",
+        AppMode::DescribeView | AppMode::SecretDecode => " q:Close  ?:Help",
+        AppMode::Help => " q/Esc:Close  j/k:Scroll",
+        _ => " q:Quit  /:Filter  ?:Help",
     };
-    let p = Paragraph::new(help).style(STYLE_NORMAL);
+    let p = Paragraph::new(hint).style(STYLE_NORMAL);
     f.render_widget(p, area);
 }
 

@@ -119,6 +119,9 @@ pub struct App {
     pub sort_column: [usize; 3],
     pub sort_direction: [SortDirection; 3],
 
+    pub help_return_mode: AppMode,
+    pub help_scroll: usize,
+
     pub app_state: AppState,
 }
 
@@ -199,6 +202,8 @@ impl App {
                 wide_deployments: false,
                 sort_column: [0; 3],
                 sort_direction: [SortDirection::Asc; 3],
+                help_return_mode: AppMode::List,
+                help_scroll: 0,
                 app_state: AppState::load(),
             },
             rx,
@@ -1009,6 +1014,8 @@ impl App {
             wide_deployments: false,
             sort_column: [0; 3],
             sort_direction: [SortDirection::Asc; 3],
+            help_return_mode: AppMode::List,
+            help_scroll: 0,
             app_state: AppState::default(),
         }
     }
