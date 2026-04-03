@@ -63,6 +63,14 @@ Sleep 200ms
 Type "j"
 Sleep 300ms
 
+# Open help popup
+Type "?"
+Sleep 2s
+
+# Close help
+Escape
+Sleep 300ms
+
 # Switch to Secrets tab
 Tab
 Sleep 1s

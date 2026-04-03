@@ -40,6 +40,7 @@ pub enum AppMode {
     DescribeView,
     StatusFilter,
     LogSearchInput,
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
