@@ -430,17 +430,17 @@ fn handle_port_forward_list(app: &mut App, key: KeyEvent) {
             app.mode = AppMode::List;
         }
         KeyCode::Char('d') | KeyCode::Delete => {
-            if let Some(idx) = app.port_forward_list_state.selected() {
-                if idx < len {
-                    let id = app.port_forwards[idx].id;
-                    app.stop_port_forward(id);
-                    app.set_success("Port forward stopped".to_string());
-                    if app.port_forwards.is_empty() {
-                        app.mode = AppMode::List;
-                    } else {
-                        let new_idx = idx.min(app.port_forwards.len().saturating_sub(1));
-                        app.port_forward_list_state.select(Some(new_idx));
-                    }
+            if let Some(idx) = app.port_forward_list_state.selected()
+                && idx < len
+            {
+                let id = app.port_forwards[idx].id;
+                app.stop_port_forward(id);
+                app.set_success("Port forward stopped".to_string());
+                if app.port_forwards.is_empty() {
+                    app.mode = AppMode::List;
+                } else {
+                    let new_idx = idx.min(app.port_forwards.len().saturating_sub(1));
+                    app.port_forward_list_state.select(Some(new_idx));
                 }
             }
         }
@@ -2202,7 +2202,7 @@ mod tests {
     async fn log_hscroll_l_increases() {
         let mut app = App::new_test();
         app.mode = AppMode::LogView;
-        app.log_buffer.push_back("x".repeat(300));
+        app.log_buffer.push_back("x".repeat(1000));
         handle_input(&mut app, key(KeyCode::Char('l')));
         assert_eq!(app.log_hscroll, 4);
         handle_input(&mut app, key(KeyCode::Char('l')));

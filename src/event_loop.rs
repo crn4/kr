@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{Event, EventStream};
-use futures::{FutureExt, StreamExt};
 use futures::stream::{BoxStream, SelectAll};
+use futures::{FutureExt, StreamExt};
 use ratatui::{Terminal, backend::Backend};
 use std::time::Duration;
 use tokio::time;
@@ -101,7 +101,11 @@ fn ensure_watcher(
     app.tab_loading_since[idx] = Some(std::time::Instant::now());
 }
 
-fn handle_tagged_event(app: &mut App, tagged: TaggedWatcherEvent, watcher_active: &mut [bool; 3]) -> bool {
+fn handle_tagged_event(
+    app: &mut App,
+    tagged: TaggedWatcherEvent,
+    watcher_active: &mut [bool; 3],
+) -> bool {
     let tab = tagged.tab;
     let idx = tab.index();
     let is_active = tab == app.active_tab;
@@ -191,10 +195,8 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         KubeResourceEvent::PortForwardStopped { id, error } => {
             let user_stopped = app.port_forward_stopped_ids.remove(&id);
             app.port_forwards.retain(|pf| pf.id != id);
-            if !user_stopped {
-                if let Some(err) = error {
-                    app.set_error(err);
-                }
+            if !user_stopped && let Some(err) = error {
+                app.set_error(err);
             }
             if app.mode == AppMode::PortForwardList && app.port_forwards.is_empty() {
                 app.mode = AppMode::List;
@@ -288,8 +290,8 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
             app.dirty = true;
         }
 
-        let ns_or_ctx_changed = app.current_namespace != current_ns
-            || app.current_context != current_ctx;
+        let ns_or_ctx_changed =
+            app.current_namespace != current_ns || app.current_context != current_ctx;
 
         if ns_or_ctx_changed {
             current_ns = app.current_namespace.clone();
@@ -584,13 +586,24 @@ mod tests {
         let mut tagged = tag_stream(stream, ResourceType::Pod);
 
         let first = tagged.next().await;
-        assert!(matches!(first, Some(TaggedWatcherEvent { event: KubeResourceEvent::Refresh, .. })));
+        assert!(matches!(
+            first,
+            Some(TaggedWatcherEvent {
+                event: KubeResourceEvent::Refresh,
+                ..
+            })
+        ));
 
         let second = tagged.next().await;
-        assert!(matches!(second, Some(TaggedWatcherEvent { event: KubeResourceEvent::WatcherForbidden(_), .. })));
+        assert!(matches!(
+            second,
+            Some(TaggedWatcherEvent {
+                event: KubeResourceEvent::WatcherForbidden(_),
+                ..
+            })
+        ));
 
         let third = tagged.next().await;
         assert!(third.is_none());
     }
-
 }
