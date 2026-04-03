@@ -22,6 +22,7 @@ pub fn draw_popup(f: &mut Frame, app: &mut App) {
             }
         }
         AppMode::StatusFilter => draw_status_filter_popup(f, app),
+        AppMode::PortForwardList => draw_port_forward_list(f, app),
         _ => {}
     }
 }
@@ -149,4 +150,48 @@ fn draw_status_filter_popup(f: &mut Frame, app: &mut App) {
         .highlight_symbol(">> ");
 
     f.render_stateful_widget(list, area, &mut app.status_filter_state);
+}
+
+fn draw_port_forward_list(f: &mut Frame, app: &mut App) {
+    let entries: Vec<String> = app
+        .port_forwards
+        .iter()
+        .map(|pf| {
+            let age = crate::utils::format_duration_short(pf.started_at.elapsed().as_secs());
+            format!(
+                "localhost:{} → {}:{} ({}, {})",
+                pf.local_port, pf.pod_name, pf.remote_port, pf.namespace, age
+            )
+        })
+        .collect();
+
+    let max_line = entries.iter().map(|s| s.len()).max().unwrap_or(20);
+    let w = (max_line as u16 + 2 + 3).max(30); // +2 borders, +3 highlight ">> "
+    let h = (entries.len() as u16 + 2).max(4);
+    let area = centered_fixed_rect(w, h, f.area());
+    f.render_widget(Clear, area);
+
+    let list_items: Vec<ListItem> = entries
+        .iter()
+        .zip(app.port_forwards.iter())
+        .map(|(text, pf)| {
+            let local_part = format!("localhost:{}", pf.local_port);
+            let rest = &text[local_part.len()..];
+            ListItem::new(Line::from(vec![
+                Span::styled(local_part, Style::default().fg(crate::ui::theme::COLOR_HIGHLIGHT)),
+                Span::styled(rest, STYLE_NORMAL),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(list_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Active Forwards"),
+        )
+        .highlight_style(STYLE_HIGHLIGHT)
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(list, area, &mut app.port_forward_list_state);
 }

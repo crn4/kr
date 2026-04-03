@@ -50,6 +50,7 @@ static LIST_ACTIONS: Section = ("Actions", &[
 static LIST_GLOBAL: Section = ("Global", &[
     ("c            ", "Switch context"),
     ("n            ", "Switch namespace"),
+    ("P            ", "Active port forwards"),
     ("q / Ctrl+C   ", "Quit"),
 ]);
 
@@ -57,6 +58,7 @@ static POD_ACTIONS: &[Binding] = &[
     ("f            ", "Filter by status"),
     ("l            ", "Stream logs"),
     ("s            ", "Shell into pod"),
+    ("p            ", "Port forward"),
 ];
 
 static DEPLOYMENT_ACTIONS: &[Binding] = &[
@@ -283,7 +285,7 @@ mod tests {
         let secret_count = count_lines(sections_for_mode(&app));
 
         assert!(pod_count > secret_count);
-        assert_eq!(pod_count, deploy_count);
+        assert!(pod_count >= deploy_count);
     }
 
     #[tokio::test]

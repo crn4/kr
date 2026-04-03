@@ -188,6 +188,18 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
             app.available_namespaces = app.app_state.merge_namespaces(&ctx, &namespaces);
             app.app_state.save();
         }
+        KubeResourceEvent::PortForwardStopped { id, error } => {
+            let user_stopped = app.port_forward_stopped_ids.remove(&id);
+            app.port_forwards.retain(|pf| pf.id != id);
+            if !user_stopped {
+                if let Some(err) = error {
+                    app.set_error(err);
+                }
+            }
+            if app.mode == AppMode::PortForwardList && app.port_forwards.is_empty() {
+                app.mode = AppMode::List;
+            }
+        }
     }
     app.dirty = true;
 }
@@ -232,6 +244,7 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
 
         if app.should_quit {
             app.abort_log_stream();
+            app.stop_all_port_forwards();
             return Ok(());
         }
 
@@ -256,6 +269,7 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
 
             match result {
                 Ok(client) => {
+                    app.stop_all_port_forwards();
                     app.client = client;
                     app.current_namespace = crate::k8s::config::get_namespace_for_context(&new_ctx);
                     app.current_context = new_ctx.clone();

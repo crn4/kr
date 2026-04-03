@@ -22,6 +22,16 @@ pub struct ShellSession {
     _master: Box<dyn portable_pty::MasterPty + Send>,
 }
 
+pub struct ActivePortForward {
+    pub id: u64,
+    pub pod_name: String,
+    pub namespace: String,
+    pub local_port: u16,
+    pub remote_port: u16,
+    pub abort_handle: AbortHandle,
+    pub started_at: Instant,
+}
+
 pub(crate) const MAX_LOG_LINES: usize = 10_000;
 pub(crate) const LOG_CHROME_LINES: usize = 6;
 
@@ -122,6 +132,12 @@ pub struct App {
     pub help_return_mode: AppMode,
     pub help_scroll: usize,
 
+    pub port_forward_input: String,
+    pub port_forwards: Vec<ActivePortForward>,
+    pub port_forward_list_state: ListState,
+    pub port_forward_next_id: u64,
+    pub port_forward_stopped_ids: HashSet<u64>,
+
     pub app_state: AppState,
 }
 
@@ -204,6 +220,11 @@ impl App {
                 sort_direction: [SortDirection::Asc; 3],
                 help_return_mode: AppMode::List,
                 help_scroll: 0,
+                port_forward_input: String::new(),
+                port_forwards: Vec::new(),
+                port_forward_list_state: ListState::default(),
+                port_forward_next_id: 0,
+                port_forward_stopped_ids: HashSet::new(),
                 app_state: AppState::load(),
             },
             rx,
@@ -701,6 +722,58 @@ impl App {
         }
     }
 
+    pub fn start_port_forward(
+        &mut self,
+        pod_name: &str,
+        namespace: &str,
+        local_port: u16,
+        remote_port: u16,
+    ) {
+        let id = self.port_forward_next_id;
+        self.port_forward_next_id += 1;
+        let abort_handle = crate::k8s::actions::spawn_port_forward(
+            namespace,
+            pod_name,
+            local_port,
+            remote_port,
+            &self.current_context,
+            id,
+            self.event_tx.clone(),
+        );
+        self.port_forwards.push(ActivePortForward {
+            id,
+            pod_name: pod_name.to_owned(),
+            namespace: namespace.to_owned(),
+            local_port,
+            remote_port,
+            abort_handle,
+            started_at: Instant::now(),
+        });
+        self.set_success(format!(
+            "Forwarding localhost:{} → {}:{}",
+            local_port, pod_name, remote_port
+        ));
+    }
+
+    pub fn stop_port_forward(&mut self, id: u64) {
+        if let Some(idx) = self.port_forwards.iter().position(|pf| pf.id == id) {
+            let pf = self.port_forwards.remove(idx);
+            self.port_forward_stopped_ids.insert(id);
+            pf.abort_handle.abort();
+        }
+    }
+
+    pub fn stop_all_port_forwards(&mut self) {
+        for pf in self.port_forwards.drain(..) {
+            self.port_forward_stopped_ids.insert(pf.id);
+            pf.abort_handle.abort();
+        }
+    }
+
+    pub fn is_local_port_in_use(&self, port: u16) -> bool {
+        self.port_forwards.iter().any(|pf| pf.local_port == port)
+    }
+
     pub fn start_shell(&mut self, pod_name: &str, namespace: &str) {
         use portable_pty::CommandBuilder;
         let mut cmd = CommandBuilder::new("kubectl");
@@ -1016,6 +1089,11 @@ impl App {
             sort_direction: [SortDirection::Asc; 3],
             help_return_mode: AppMode::List,
             help_scroll: 0,
+            port_forward_input: String::new(),
+            port_forwards: Vec::new(),
+            port_forward_list_state: ListState::default(),
+            port_forward_next_id: 0,
+            port_forward_stopped_ids: HashSet::new(),
             app_state: AppState::default(),
         }
     }
@@ -1886,5 +1964,62 @@ mod tests {
         assert_eq!(app.filtered_items[0].name(), "alpha");
         assert_eq!(app.filtered_items[1].name(), "bravo");
         assert_eq!(app.filtered_items[2].name(), "charlie");
+    }
+
+    #[tokio::test]
+    async fn is_local_port_in_use_detects_active_forward() {
+        let mut app = App::new_test();
+        assert!(!app.is_local_port_in_use(8080));
+        app.port_forwards.push(ActivePortForward {
+            id: 0,
+            pod_name: "test".into(),
+            namespace: "default".into(),
+            local_port: 8080,
+            remote_port: 80,
+            abort_handle: tokio::spawn(async {}).abort_handle(),
+            started_at: Instant::now(),
+        });
+        assert!(app.is_local_port_in_use(8080));
+        assert!(!app.is_local_port_in_use(9090));
+    }
+
+    #[tokio::test]
+    async fn stop_port_forward_removes_by_id() {
+        let mut app = App::new_test();
+        app.port_forwards.push(ActivePortForward {
+            id: 42,
+            pod_name: "test".into(),
+            namespace: "default".into(),
+            local_port: 8080,
+            remote_port: 80,
+            abort_handle: tokio::spawn(async {}).abort_handle(),
+            started_at: Instant::now(),
+        });
+        assert_eq!(app.port_forwards.len(), 1);
+        app.stop_port_forward(42);
+        assert!(app.port_forwards.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_all_port_forwards_clears_all() {
+        let mut app = App::new_test();
+        for i in 0..3 {
+            app.port_forwards.push(ActivePortForward {
+                id: i,
+                pod_name: format!("pod-{i}"),
+                namespace: "default".into(),
+                local_port: 8080 + i as u16,
+                remote_port: 80,
+                abort_handle: tokio::spawn(async {}).abort_handle(),
+                started_at: Instant::now(),
+            });
+        }
+        assert_eq!(app.port_forwards.len(), 3);
+        app.stop_all_port_forwards();
+        assert!(app.port_forwards.is_empty());
+        assert_eq!(app.port_forward_stopped_ids.len(), 3);
+        for i in 0..3 {
+            assert!(app.port_forward_stopped_ids.contains(&i));
+        }
     }
 }

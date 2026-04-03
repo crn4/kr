@@ -102,6 +102,59 @@ pub async fn rollout_restart(client: Client, namespace: &str, name: &str) -> Res
     Ok(())
 }
 
+pub fn spawn_port_forward(
+    namespace: &str,
+    pod_name: &str,
+    local_port: u16,
+    remote_port: u16,
+    context: &str,
+    id: u64,
+    tx: UnboundedSender<KubeResourceEvent>,
+) -> tokio::task::AbortHandle {
+    let namespace = namespace.to_owned();
+    let pod_name = pod_name.to_owned();
+    let context = context.to_owned();
+    let handle = tokio::spawn(async move {
+        let port_arg = format!("{}:{}", local_port, remote_port);
+        match tokio::process::Command::new("kubectl")
+            .args([
+                "port-forward",
+                &pod_name,
+                &port_arg,
+                "-n",
+                &namespace,
+                "--context",
+                &context,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(mut child) => {
+                let status = child.wait().await;
+                let error = match status {
+                    Ok(s) if s.success() => None,
+                    Ok(s) => Some(format!(
+                        "Port forward {}:{} exited with {}",
+                        pod_name, remote_port, s
+                    )),
+                    Err(e) => Some(format!("Port forward error: {e}")),
+                };
+                let _ = tx.send(KubeResourceEvent::PortForwardStopped { id, error });
+            }
+            Err(e) => {
+                let _ = tx.send(KubeResourceEvent::PortForwardStopped {
+                    id,
+                    error: Some(format!("Failed to start kubectl: {e}")),
+                });
+            }
+        }
+    });
+    handle.abort_handle()
+}
+
 pub fn fetch_log_history(
     client: Client,
     namespace: &str,
