@@ -60,6 +60,7 @@ kr -c "get pods -n kube-system"
 | `o` | Cycle sort column |
 | `O` | Toggle sort direction (asc/desc) |
 | `w` | Toggle wide view (Pods, Deployments) |
+| `?` | Show context-aware help popup |
 | `Esc` | Clear filter / close modal / back |
 | `q` | Quit |
 
