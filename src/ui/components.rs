@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use std::borrow::Cow;
 
-pub fn build_sort_header<'a>(
+pub fn build_sort_header(
     columns: &[&'static str],
     sort_col: usize,
     sort_indicator: &str,
