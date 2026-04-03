@@ -1,22 +1,24 @@
 use jiff::Timestamp;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 
+pub fn format_duration_short(secs: u64) -> String {
+    if secs >= 86400 {
+        format!("{}d", secs / 86400)
+    } else if secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 pub fn get_resource_age(timestamp: Option<&Time>) -> String {
     match timestamp {
         Some(time) => {
             let now = Timestamp::now();
             let duration = now.duration_since(time.0);
-            let secs = duration.as_secs();
-
-            if secs >= 86400 {
-                format!("{}d", secs / 86400)
-            } else if secs >= 3600 {
-                format!("{}h", secs / 3600)
-            } else if secs >= 60 {
-                format!("{}m", secs / 60)
-            } else {
-                format!("{secs}s")
-            }
+            format_duration_short(duration.as_secs().max(0) as u64)
         }
         None => "?".to_string(),
     }

@@ -41,6 +41,8 @@ pub enum AppMode {
     StatusFilter,
     LogSearchInput,
     Help,
+    PortForwardInput,
+    PortForwardList,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +107,7 @@ pub enum KubeResourceEvent {
     ShellExited,
     DescribeReady(Vec<String>),
     NamespacesLoaded(Vec<String>),
+    PortForwardStopped { id: u64, error: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +123,12 @@ pub enum PendingAction {
     ScaleDeployment {
         name: String,
         replicas: u32,
+    },
+    PortForward {
+        pod_name: String,
+        namespace: String,
+        local_port: u16,
+        remote_port: u16,
     },
 }
 
@@ -157,6 +166,17 @@ impl PendingAction {
                 } else {
                     format!("Scale '{}' to {} replicas?", name, replicas)
                 }
+            }
+            Self::PortForward {
+                pod_name,
+                local_port,
+                remote_port,
+                ..
+            } => {
+                format!(
+                    "Forward localhost:{} → {}:{}?",
+                    local_port, pod_name, remote_port
+                )
             }
         }
     }

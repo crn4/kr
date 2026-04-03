@@ -17,6 +17,8 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         AppMode::DescribeView => handle_describe_input(app, key),
         AppMode::StatusFilter => handle_status_filter_input(app, key),
         AppMode::Help => handle_help_input(app, key),
+        AppMode::PortForwardInput => handle_port_forward_input(app, key),
+        AppMode::PortForwardList => handle_port_forward_list(app, key),
         AppMode::List => handle_global_input(app, key),
     }
 }
@@ -66,6 +68,7 @@ fn is_valid_k8s_name(s: &str) -> bool {
 
 fn select_namespace(app: &mut App, ns: String) {
     if !ns.is_empty() {
+        app.stop_all_port_forwards();
         app.current_namespace = ns.clone();
         let ctx = app.current_context.clone();
         app.app_state.add_namespace(&ctx, &ns);
@@ -361,6 +364,110 @@ fn handle_help_input(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn parse_port_input(input: &str) -> Option<(u16, u16)> {
+    if let Some((local_str, remote_str)) = input.split_once(':') {
+        let local = local_str.parse::<u16>().ok().filter(|&p| p >= 1)?;
+        let remote = remote_str.parse::<u16>().ok().filter(|&p| p >= 1)?;
+        Some((local, remote))
+    } else {
+        let port = input.parse::<u16>().ok().filter(|&p| p >= 1)?;
+        Some((port, port))
+    }
+}
+
+fn handle_port_forward_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = AppMode::List;
+        }
+        KeyCode::Enter => {
+            if app.port_forward_input.is_empty() {
+                app.set_error("Enter a port (e.g. 8080:80 or 80)".to_string());
+                return;
+            }
+            match parse_port_input(&app.port_forward_input) {
+                Some((local_port, remote_port)) => {
+                    if app.is_local_port_in_use(local_port) {
+                        app.set_error(format!("Port {} already in use", local_port));
+                        return;
+                    }
+                    if let Some(res) = app.get_selected_resource() {
+                        let pod_name = res.name().to_owned();
+                        let namespace = app.current_namespace.clone();
+                        app.pending_action = Some(PendingAction::PortForward {
+                            pod_name,
+                            namespace,
+                            local_port,
+                            remote_port,
+                        });
+                        app.mode = AppMode::Confirm;
+                        return;
+                    }
+                }
+                None => {
+                    app.set_error("Invalid port format (use 8080:80 or 80)".to_string());
+                }
+            }
+            app.mode = AppMode::List;
+        }
+        KeyCode::Backspace => {
+            app.port_forward_input.pop();
+        }
+        KeyCode::Char(c)
+            if (c.is_ascii_digit() || (c == ':' && !app.port_forward_input.contains(':')))
+                && app.port_forward_input.len() < 11 =>
+        {
+            app.port_forward_input.push(c);
+        }
+        _ => {}
+    }
+}
+
+fn handle_port_forward_list(app: &mut App, key: KeyEvent) {
+    let len = app.port_forwards.len();
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = AppMode::List;
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            if let Some(idx) = app.port_forward_list_state.selected() {
+                if idx < len {
+                    let id = app.port_forwards[idx].id;
+                    app.stop_port_forward(id);
+                    app.set_success("Port forward stopped".to_string());
+                    if app.port_forwards.is_empty() {
+                        app.mode = AppMode::List;
+                    } else {
+                        let new_idx = idx.min(app.port_forwards.len().saturating_sub(1));
+                        app.port_forward_list_state.select(Some(new_idx));
+                    }
+                }
+            }
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if len > 0 {
+                let i = app
+                    .port_forward_list_state
+                    .selected()
+                    .map(|i| (i + 1).min(len.saturating_sub(1)))
+                    .unwrap_or(0);
+                app.port_forward_list_state.select(Some(i));
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if len > 0 {
+                let i = app
+                    .port_forward_list_state
+                    .selected()
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or(0);
+                app.port_forward_list_state.select(Some(i));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle_global_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
@@ -491,6 +598,22 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
                 app.start_shell(&name, &ns);
             } else {
                 app.set_error("No pod selected".to_string());
+            }
+        }
+        KeyCode::Char('p') if app.active_tab == ResourceType::Pod => {
+            if app.get_selected_resource().is_some() {
+                app.port_forward_input.clear();
+                app.mode = AppMode::PortForwardInput;
+            } else {
+                app.set_error("No pod selected".to_string());
+            }
+        }
+        KeyCode::Char('P') => {
+            if app.port_forwards.is_empty() {
+                app.set_error("No active port forwards".to_string());
+            } else {
+                app.port_forward_list_state.select(Some(0));
+                app.mode = AppMode::PortForwardList;
             }
         }
         KeyCode::Delete | KeyCode::Char('D')
@@ -1015,6 +1138,14 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                                 }
                             });
                         });
+                    }
+                    PendingAction::PortForward {
+                        pod_name,
+                        namespace,
+                        local_port,
+                        remote_port,
+                    } => {
+                        app.start_port_forward(&pod_name, &namespace, local_port, remote_port);
                     }
                 }
                 app.selected_indices.clear();
@@ -2327,5 +2458,155 @@ mod tests {
         app.help_scroll = 0;
         handle_input(&mut app, key(KeyCode::Char('k')));
         assert_eq!(app.help_scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn p_opens_port_forward_input_on_pod_tab() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("nginx")];
+        app.table_state.select(Some(0));
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        assert_eq!(app.mode, AppMode::PortForwardInput);
+    }
+
+    #[tokio::test]
+    async fn p_ignored_on_deployment_tab() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn p_requires_pod_selection() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn shift_p_shows_error_when_no_forwards() {
+        let mut app = App::new_test();
+        handle_input(&mut app, key(KeyCode::Char('P')));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn port_forward_input_accepts_digits_and_colon() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardInput;
+        handle_input(&mut app, key(KeyCode::Char('8')));
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        handle_input(&mut app, key(KeyCode::Char(':')));
+        handle_input(&mut app, key(KeyCode::Char('8')));
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        assert_eq!(app.port_forward_input, "80:80");
+    }
+
+    #[tokio::test]
+    async fn port_forward_input_rejects_letters() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardInput;
+        handle_input(&mut app, key(KeyCode::Char('a')));
+        assert!(app.port_forward_input.is_empty());
+    }
+
+    #[tokio::test]
+    async fn port_forward_input_esc_cancels() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardInput;
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn port_forward_input_empty_shows_error() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardInput;
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn parse_port_local_remote() {
+        assert_eq!(parse_port_input("8080:80"), Some((8080, 80)));
+    }
+
+    #[tokio::test]
+    async fn parse_port_single() {
+        assert_eq!(parse_port_input("80"), Some((80, 80)));
+    }
+
+    #[tokio::test]
+    async fn parse_port_invalid() {
+        assert_eq!(parse_port_input("abc"), None);
+        assert_eq!(parse_port_input("0"), None);
+        assert_eq!(parse_port_input("8080:0"), None);
+        assert_eq!(parse_port_input(""), None);
+    }
+
+    #[tokio::test]
+    async fn port_forward_list_esc_returns_to_list() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardList;
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn port_forward_list_d_stops_forward() {
+        let mut app = App::new_test();
+        app.port_forwards.push(crate::app::ActivePortForward {
+            id: 1,
+            pod_name: "nginx".into(),
+            namespace: "default".into(),
+            local_port: 8080,
+            remote_port: 80,
+            abort_handle: tokio::spawn(async {}).abort_handle(),
+            started_at: std::time::Instant::now(),
+        });
+        app.port_forward_list_state.select(Some(0));
+        app.mode = AppMode::PortForwardList;
+        handle_input(&mut app, key(KeyCode::Char('d')));
+        assert!(app.port_forwards.is_empty());
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn port_forward_confirm_starts_forward() {
+        let mut app = App::new_test();
+        app.pending_action = Some(PendingAction::PortForward {
+            pod_name: "nginx".into(),
+            namespace: "default".into(),
+            local_port: 9090,
+            remote_port: 80,
+        });
+        app.mode = AppMode::Confirm;
+        handle_input(&mut app, key(KeyCode::Char('y')));
+        assert_eq!(app.mode, AppMode::List);
+        assert_eq!(app.port_forwards.len(), 1);
+        assert_eq!(app.port_forwards[0].local_port, 9090);
+    }
+
+    #[tokio::test]
+    async fn port_forward_input_rejects_double_colon() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardInput;
+        app.port_forward_input = "8080:80".to_string();
+        handle_input(&mut app, key(KeyCode::Char(':')));
+        assert_eq!(app.port_forward_input, "8080:80");
+    }
+
+    #[tokio::test]
+    async fn port_forward_input_rejects_long_input() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardInput;
+        app.port_forward_input = "65535:65535".to_string();
+        handle_input(&mut app, key(KeyCode::Char('1')));
+        assert_eq!(app.port_forward_input, "65535:65535");
     }
 }

@@ -31,10 +31,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match app.mode {
         AppMode::SecretDecode => secrets_view::draw_decode_modal(f, app),
-        AppMode::ContextSelect | AppMode::NamespaceSelect | AppMode::StatusFilter => {
-            popup_view::draw_popup(f, app)
-        }
+        AppMode::ContextSelect
+        | AppMode::NamespaceSelect
+        | AppMode::StatusFilter
+        | AppMode::PortForwardList => popup_view::draw_popup(f, app),
         AppMode::ScaleInput => draw_scale_input(f, app),
+        AppMode::PortForwardInput => draw_port_forward_input(f, app),
         AppMode::Confirm => draw_confirm(f, app),
         AppMode::ShellView => shell_view::draw(f, app),
         AppMode::DescribeView => describe_view::draw(f, app),
@@ -161,13 +163,23 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         AppMode::FilterInput => " Type to filter | Enter:Confirm | Esc:Cancel",
         AppMode::LogSearchInput => " Type to search | Enter:Confirm | Esc:Cancel",
         AppMode::ScaleInput => " Replicas (0-1000) | Enter:Confirm | Esc:Cancel",
+        AppMode::PortForwardInput => " Port (8080:80 or 80) | Enter:Confirm | Esc:Cancel",
         AppMode::Confirm => " y:Confirm | n/Esc:Cancel",
         AppMode::LogView => " q:Back  /:Search  ?:Help",
         AppMode::DescribeView | AppMode::SecretDecode => " q:Close  ?:Help",
         AppMode::Help => " q/Esc:Close  j/k:Scroll",
+        AppMode::PortForwardList => " j/k:Nav  d:Stop  Esc:Close",
         _ => " q:Quit  /:Filter  ?:Help",
     };
-    let p = Paragraph::new(hint).style(STYLE_NORMAL);
+    let pf_count = app.port_forwards.len();
+    let mut spans = vec![Span::styled(hint, STYLE_NORMAL)];
+    if pf_count > 0 {
+        let pf_style = Style::default()
+            .fg(ratatui::style::Color::Green)
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        spans.push(Span::styled(format!("  P:Fwd({})", pf_count), pf_style));
+    }
+    let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, area);
 }
 
@@ -187,15 +199,34 @@ fn draw_scale_input(f: &mut Frame, app: &App) {
     f.render_widget(p, area);
 }
 
-fn draw_confirm(f: &mut Frame, app: &App) {
-    let area = centered_fixed_rect(50, 9, f.area());
+fn draw_port_forward_input(f: &mut Frame, app: &App) {
+    let area = centered_fixed_rect(40, 5, f.area());
     f.render_widget(Clear, area);
 
+    let text = format!("Port: {}_", app.port_forward_input);
+    let p = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Port Forward")
+                .style(STYLE_NORMAL),
+        )
+        .style(STYLE_NORMAL);
+    f.render_widget(p, area);
+}
+
+fn draw_confirm(f: &mut Frame, app: &App) {
     let msg = app
         .pending_action
         .as_ref()
         .map(|a| a.message())
         .unwrap_or_else(|| "Confirm action?".to_string());
+    let max_line = msg.lines().map(|l| l.len()).max().unwrap_or(15);
+    let w = (max_line as u16 + 4).max(30); // +2 borders, +2 padding
+    let h = (msg.lines().count() as u16 + 4).max(7); // +2 borders, +2 for [y/n] line
+    let area = centered_fixed_rect(w, h, f.area());
+    f.render_widget(Clear, area);
+
     let text = format!("{}\n\n[y] Yes  [n] No", msg);
     let p = Paragraph::new(text)
         .block(
