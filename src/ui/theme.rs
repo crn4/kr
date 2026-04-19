@@ -20,3 +20,8 @@ pub const STYLE_SEARCH_MATCH: Style = Style::new()
     .fg(Color::Black)
     .bg(Color::Yellow)
     .add_modifier(Modifier::BOLD);
+
+pub const STYLE_LOG_SELECTION: Style = Style::new()
+    .fg(Color::White)
+    .bg(Color::Blue)
+    .add_modifier(Modifier::BOLD);

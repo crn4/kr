@@ -31,6 +31,7 @@ pub enum AppMode {
     List,
     FilterInput,
     LogView,
+    LogVisualSelect,
     SecretDecode,
     ContextSelect,
     NamespaceSelect,

@@ -65,9 +65,21 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         app.log_search_query.as_str()
     };
 
+    let sel_range = if app.mode == AppMode::LogVisualSelect {
+        app.log_selection_range()
+    } else {
+        None
+    };
+
     let end = (scroll_offset + visible_height).min(total_lines);
     let lines: Vec<Line> = (scroll_offset..end)
-        .map(|i| highlight_line(&app.log_buffer[i], query_lower))
+        .map(|i| {
+            let line = highlight_line(&app.log_buffer[i], query_lower);
+            match sel_range {
+                Some((lo, hi)) if i >= lo && i <= hi => line.style(STYLE_LOG_SELECTION),
+                _ => line,
+            }
+        })
         .collect();
 
     let history_label = if app.log_search_pending && app.log_loading_history {
@@ -77,17 +89,19 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         ""
     };
-    let search_label = if app.mode == AppMode::LogSearchInput {
-        format!(" /{}_", app.log_search_input)
+    let mut title = format!("Logs [{} lines] [{}]", total_lines, mode_label);
+    if let Some((lo, hi)) = sel_range {
+        use std::fmt::Write;
+        let _ = write!(title, " [VISUAL {} lines]", hi - lo + 1);
+    }
+    title.push_str(history_label);
+    if app.mode == AppMode::LogSearchInput {
+        use std::fmt::Write;
+        let _ = write!(title, " /{}_", app.log_search_input);
     } else if !app.log_search_query.is_empty() {
-        format!(" /{}", app.log_search_query)
-    } else {
-        String::new()
-    };
-    let title = format!(
-        "Logs [{} lines] [{}]{}{}",
-        total_lines, mode_label, history_label, search_label,
-    );
+        use std::fmt::Write;
+        let _ = write!(title, " /{}", app.log_search_query);
+    }
 
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(title))
