@@ -109,8 +109,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
 
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
-    if !matches!(app.mode, AppMode::LogView | AppMode::LogSearchInput)
-        && app.is_active_tab_loading()
+    if !matches!(
+        app.mode,
+        AppMode::LogView | AppMode::LogSearchInput | AppMode::LogVisualSelect
+    ) && app.is_active_tab_loading()
         && app.filtered_items.is_empty()
     {
         let resource = match app.active_tab {
@@ -137,7 +139,9 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     match app.mode {
-        AppMode::LogView | AppMode::LogSearchInput => logs_view::draw(f, app, area),
+        AppMode::LogView | AppMode::LogSearchInput | AppMode::LogVisualSelect => {
+            logs_view::draw(f, app, area)
+        }
         _ => match app.active_tab {
             ResourceType::Pod => pods_view::draw(f, app, area),
             ResourceType::Deployment => deployments_view::draw(f, app, area),
@@ -165,7 +169,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         AppMode::ScaleInput => " Replicas (0-1000) | Enter:Confirm | Esc:Cancel",
         AppMode::PortForwardInput => " Port (8080:80 or 80) | Enter:Confirm | Esc:Cancel",
         AppMode::Confirm => " y:Confirm | n/Esc:Cancel",
-        AppMode::LogView => " q:Back  /:Search  ?:Help",
+        AppMode::LogView => " q:Back  /:Search  V:Select  ?:Help",
+        AppMode::LogVisualSelect => " j/k:Extend  g/G:Top/Bot  y:Copy  Esc:Cancel",
         AppMode::DescribeView | AppMode::SecretDecode => " q:Close  ?:Help",
         AppMode::Help => " q/Esc:Close  j/k:Scroll",
         AppMode::PortForwardList => " j/k:Nav  d:Stop  Esc:Close",

@@ -86,8 +86,21 @@ static LOG_SECTIONS: &[Section] = &[
         ("N            ", "Prev match (newer)"),
         ("Esc          ", "Clear search"),
     ]),
+    ("Selection", &[
+        ("V            ", "Enter visual mode"),
+    ]),
     ("", &[
         ("q / Esc      ", "Back to list"),
+    ]),
+];
+
+static LOG_VISUAL_SECTIONS: &[Section] = &[
+    ("Selection", &[
+        ("j/k ↑/↓     ", "Extend selection"),
+        ("PgUp/PgDn    ", "Extend by page"),
+        ("g / G        ", "Top / Bottom"),
+        ("y / Enter    ", "Copy selection (15s)"),
+        ("V / Esc / q  ", "Cancel"),
     ]),
 ];
 
@@ -150,6 +163,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn help_title(app: &App) -> &'static str {
     match app.help_return_mode {
         AppMode::LogView => "Help — Logs",
+        AppMode::LogVisualSelect => "Help — Logs Visual",
         AppMode::DescribeView => "Help — Describe",
         AppMode::SecretDecode => "Help — Secret",
         AppMode::List => match app.active_tab {
@@ -164,6 +178,7 @@ fn help_title(app: &App) -> &'static str {
 fn sections_for_mode(app: &App) -> &'static [Section] {
     match app.help_return_mode {
         AppMode::LogView => LOG_SECTIONS,
+        AppMode::LogVisualSelect => LOG_VISUAL_SECTIONS,
         AppMode::DescribeView => DESCRIBE_SECTIONS,
         AppMode::SecretDecode => SECRET_SECTIONS,
         _ => list_sections(app),

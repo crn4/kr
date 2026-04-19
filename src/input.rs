@@ -10,6 +10,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         AppMode::ContextSelect => handle_popup_input(app, key),
         AppMode::NamespaceSelect => handle_namespace_input(app, key),
         AppMode::LogView => handle_log_input(app, key),
+        AppMode::LogVisualSelect => handle_log_visual_input(app, key),
         AppMode::LogSearchInput => handle_log_search_input(app, key),
         AppMode::ScaleInput => handle_scale_input(app, key),
         AppMode::Confirm => handle_confirm_input(app, key),
@@ -297,6 +298,51 @@ fn handle_log_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('0') => {
             app.log_hscroll = 0;
+        }
+        KeyCode::Char('V') => {
+            app.enter_log_visual_mode();
+        }
+        _ => {}
+    }
+}
+
+fn handle_log_visual_input(app: &mut App, key: KeyEvent) {
+    let page_size = crossterm::terminal::size()
+        .map(|(_, h)| (h as usize).saturating_sub(LOG_CHROME_LINES))
+        .unwrap_or(20);
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('V') => {
+            app.exit_log_visual_mode();
+        }
+        KeyCode::Char('y') | KeyCode::Enter => {
+            app.copy_log_selection();
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.move_log_cursor(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.log_selection_cursor == 0 {
+                app.load_more_history();
+            } else {
+                app.move_log_cursor(-1);
+            }
+        }
+        KeyCode::PageDown => {
+            app.move_log_cursor(page_size as isize);
+        }
+        KeyCode::PageUp => {
+            if app.log_selection_cursor == 0 {
+                app.load_more_history();
+            } else {
+                app.move_log_cursor(-(page_size as isize));
+            }
+        }
+        KeyCode::Char('g') => {
+            app.log_cursor_top();
+        }
+        KeyCode::Char('G') => {
+            app.log_cursor_bottom();
         }
         _ => {}
     }
@@ -2608,5 +2654,78 @@ mod tests {
         app.port_forward_input = "65535:65535".to_string();
         handle_input(&mut app, key(KeyCode::Char('1')));
         assert_eq!(app.port_forward_input, "65535:65535");
+    }
+
+    #[tokio::test]
+    async fn log_view_V_enters_visual_mode() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        for i in 0..10 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+
+        handle_input(&mut app, key(KeyCode::Char('V')));
+        assert_eq!(app.mode, AppMode::LogVisualSelect);
+        assert!(app.log_selection_anchor.is_some());
+    }
+
+    #[tokio::test]
+    async fn log_visual_esc_cancels() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogVisualSelect;
+        app.log_selection_anchor = Some(3);
+        app.log_selection_cursor = 5;
+
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.mode, AppMode::LogView);
+        assert!(app.log_selection_anchor.is_none());
+    }
+
+    #[tokio::test]
+    async fn log_visual_V_toggles_off() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogVisualSelect;
+        app.log_selection_anchor = Some(0);
+        app.log_selection_cursor = 0;
+
+        handle_input(&mut app, key(KeyCode::Char('V')));
+        assert_eq!(app.mode, AppMode::LogView);
+        assert!(app.log_selection_anchor.is_none());
+    }
+
+    #[tokio::test]
+    async fn log_visual_j_k_extends_cursor() {
+        let mut app = App::new_test();
+        for i in 0..20 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.mode = AppMode::LogVisualSelect;
+        app.log_selection_anchor = Some(5);
+        app.log_selection_cursor = 5;
+        app.log_scroll_offset = Some(0);
+
+        handle_input(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.log_selection_cursor, 6);
+
+        handle_input(&mut app, key(KeyCode::Char('k')));
+        handle_input(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.log_selection_cursor, 4);
+    }
+
+    #[tokio::test]
+    async fn log_visual_g_G_jump() {
+        let mut app = App::new_test();
+        for i in 0..10 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.mode = AppMode::LogVisualSelect;
+        app.log_selection_anchor = Some(5);
+        app.log_selection_cursor = 5;
+
+        handle_input(&mut app, key(KeyCode::Char('g')));
+        assert_eq!(app.log_selection_cursor, 0);
+
+        handle_input(&mut app, key(KeyCode::Char('G')));
+        assert_eq!(app.log_selection_cursor, 9);
     }
 }

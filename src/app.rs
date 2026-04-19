@@ -123,6 +123,9 @@ pub struct App {
     pub log_search_match_line: Option<usize>,
     pub log_search_pending: bool,
 
+    pub log_selection_anchor: Option<usize>,
+    pub log_selection_cursor: usize,
+
     pub wide_pods: bool,
     pub wide_deployments: bool,
 
@@ -214,6 +217,8 @@ impl App {
                 log_search_input: String::new(),
                 log_search_match_line: None,
                 log_search_pending: false,
+                log_selection_anchor: None,
+                log_selection_cursor: 0,
                 wide_pods: false,
                 wide_deployments: false,
                 sort_column: [0; 3],
@@ -503,6 +508,8 @@ impl App {
         self.log_search_input.clear();
         self.log_search_match_line = None;
         self.log_search_pending = false;
+        self.log_selection_anchor = None;
+        self.log_selection_cursor = 0;
         self.log_pod_name = pod_name.to_owned();
         self.log_namespace = namespace.to_owned();
         self.mode = AppMode::LogView;
@@ -574,6 +581,10 @@ impl App {
         }
         if let Some(m) = &mut self.log_search_match_line {
             *m += prepend_count;
+        }
+        if let Some(anchor) = &mut self.log_selection_anchor {
+            *anchor += prepend_count;
+            self.log_selection_cursor += prepend_count;
         }
 
         self.log_loading_history = false;
@@ -892,6 +903,14 @@ impl App {
             if let Some(offset) = &mut self.log_scroll_offset {
                 *offset = offset.saturating_sub(1);
             }
+            if let Some(anchor) = self.log_selection_anchor {
+                if anchor == 0 || self.log_selection_cursor == 0 {
+                    self.log_selection_anchor = None;
+                } else {
+                    self.log_selection_anchor = Some(anchor - 1);
+                    self.log_selection_cursor -= 1;
+                }
+            }
         }
         self.log_buffer.push_back(line);
     }
@@ -964,6 +983,117 @@ impl App {
         crossterm::terminal::size()
             .map(|(_, h)| (h as usize).saturating_sub(LOG_CHROME_LINES))
             .unwrap_or(20)
+    }
+
+    pub fn enter_log_visual_mode(&mut self) {
+        if self.log_buffer.is_empty() {
+            return;
+        }
+        let visible = self.log_visible_height().max(1);
+        let last = self.log_buffer.len() - 1;
+        let cursor = match self.log_scroll_offset {
+            Some(o) => (o + visible.saturating_sub(1)).min(last),
+            None => last,
+        };
+        self.log_selection_anchor = Some(cursor);
+        self.log_selection_cursor = cursor;
+        self.mode = AppMode::LogVisualSelect;
+    }
+
+    pub fn exit_log_visual_mode(&mut self) {
+        self.log_selection_anchor = None;
+        self.mode = AppMode::LogView;
+    }
+
+    pub fn log_selection_range(&self) -> Option<(usize, usize)> {
+        self.log_selection_anchor.map(|a| {
+            let c = self.log_selection_cursor;
+            if a <= c { (a, c) } else { (c, a) }
+        })
+    }
+
+    pub fn move_log_cursor(&mut self, delta: isize) {
+        let visible = self.log_visible_height().max(1);
+        self.move_log_cursor_with_height(delta, visible);
+    }
+
+    pub(crate) fn move_log_cursor_with_height(&mut self, delta: isize, visible: usize) {
+        if self.log_buffer.is_empty() || self.log_selection_anchor.is_none() {
+            return;
+        }
+        let last = self.log_buffer.len() - 1;
+        let new_cursor = if delta >= 0 {
+            self.log_selection_cursor.saturating_add(delta as usize).min(last)
+        } else {
+            self.log_selection_cursor.saturating_sub((-delta) as usize)
+        };
+        self.log_selection_cursor = new_cursor;
+        self.ensure_cursor_visible(visible);
+    }
+
+    pub fn log_cursor_top(&mut self) {
+        if self.log_selection_anchor.is_some() {
+            self.log_selection_cursor = 0;
+            let visible = self.log_visible_height().max(1);
+            self.ensure_cursor_visible(visible);
+        }
+    }
+
+    pub fn log_cursor_bottom(&mut self) {
+        if self.log_selection_anchor.is_some() && !self.log_buffer.is_empty() {
+            self.log_selection_cursor = self.log_buffer.len() - 1;
+            let visible = self.log_visible_height().max(1);
+            self.ensure_cursor_visible(visible);
+        }
+    }
+
+    fn ensure_cursor_visible(&mut self, visible: usize) {
+        let len = self.log_buffer.len();
+        if len == 0 {
+            return;
+        }
+        let current_top = self
+            .log_scroll_offset
+            .unwrap_or(len.saturating_sub(visible));
+        let bottom = current_top + visible.saturating_sub(1);
+        let max_top = len.saturating_sub(visible);
+        let new_top = if self.log_selection_cursor < current_top {
+            self.log_selection_cursor
+        } else if self.log_selection_cursor > bottom {
+            (self.log_selection_cursor + 1).saturating_sub(visible)
+        } else {
+            current_top
+        };
+        self.log_scroll_offset = Some(new_top.min(max_top));
+    }
+
+    pub fn build_log_selection_text(&self) -> Option<(usize, String)> {
+        let (lo, hi) = self.log_selection_range()?;
+        let count = hi - lo + 1;
+        let mut text = String::new();
+        for i in lo..=hi {
+            if let Some(line) = self.log_buffer.get(i) {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(line);
+            }
+        }
+        Some((count, text))
+    }
+
+    pub fn copy_log_selection(&mut self) {
+        let Some((count, text)) = self.build_log_selection_text() else {
+            return;
+        };
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(()) => {
+                let plural = if count == 1 { "line" } else { "lines" };
+                self.set_success(format!("Copied {count} {plural} to clipboard"));
+            }
+            Err(e) => self.set_error(format!("Clipboard error: {e}")),
+        }
+        self.exit_log_visual_mode();
     }
 
     fn scroll_to_line(&mut self, idx: usize, visible: usize) {
@@ -1083,6 +1213,8 @@ impl App {
             log_search_input: String::new(),
             log_search_match_line: None,
             log_search_pending: false,
+            log_selection_anchor: None,
+            log_selection_cursor: 0,
             wide_pods: false,
             wide_deployments: false,
             sort_column: [0; 3],
@@ -2021,5 +2153,253 @@ mod tests {
         for i in 0..3 {
             assert!(app.port_forward_stopped_ids.contains(&i));
         }
+    }
+
+    #[tokio::test]
+    async fn enter_visual_mode_empty_buffer_noop() {
+        let mut app = App::new_test();
+        app.mode = AppMode::LogView;
+        app.enter_log_visual_mode();
+        assert_eq!(app.mode, AppMode::LogView);
+        assert!(app.log_selection_anchor.is_none());
+    }
+
+    #[tokio::test]
+    async fn enter_visual_mode_following_anchors_last_line() {
+        let mut app = App::new_test();
+        for i in 0..10 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.mode = AppMode::LogView;
+        app.log_scroll_offset = None;
+
+        app.enter_log_visual_mode();
+
+        assert_eq!(app.mode, AppMode::LogVisualSelect);
+        assert_eq!(app.log_selection_anchor, Some(9));
+        assert_eq!(app.log_selection_cursor, 9);
+    }
+
+    #[tokio::test]
+    async fn log_selection_range_orders_anchor_cursor() {
+        let mut app = App::new_test();
+        app.log_selection_anchor = Some(5);
+        app.log_selection_cursor = 2;
+        assert_eq!(app.log_selection_range(), Some((2, 5)));
+
+        app.log_selection_cursor = 8;
+        assert_eq!(app.log_selection_range(), Some((5, 8)));
+    }
+
+    #[tokio::test]
+    async fn move_log_cursor_extends_selection() {
+        let mut app = App::new_test();
+        for i in 0..20 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_selection_anchor = Some(5);
+        app.log_selection_cursor = 5;
+        app.log_scroll_offset = Some(0);
+
+        app.move_log_cursor_with_height(3, 20);
+        assert_eq!(app.log_selection_cursor, 8);
+        assert_eq!(app.log_selection_range(), Some((5, 8)));
+
+        app.move_log_cursor_with_height(-6, 20);
+        assert_eq!(app.log_selection_cursor, 2);
+        assert_eq!(app.log_selection_range(), Some((2, 5)));
+    }
+
+    #[tokio::test]
+    async fn move_log_cursor_clamps_to_bounds() {
+        let mut app = App::new_test();
+        for i in 0..5 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_selection_anchor = Some(2);
+        app.log_selection_cursor = 2;
+
+        app.move_log_cursor_with_height(100, 10);
+        assert_eq!(app.log_selection_cursor, 4);
+
+        app.move_log_cursor_with_height(-100, 10);
+        assert_eq!(app.log_selection_cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn move_log_cursor_auto_scrolls_down() {
+        let mut app = App::new_test();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_selection_anchor = Some(0);
+        app.log_selection_cursor = 0;
+        app.log_scroll_offset = Some(0);
+
+        app.move_log_cursor_with_height(15, 10);
+        assert_eq!(app.log_selection_cursor, 15);
+        assert_eq!(app.log_scroll_offset, Some(6));
+    }
+
+    #[tokio::test]
+    async fn move_log_cursor_auto_scrolls_up() {
+        let mut app = App::new_test();
+        for i in 0..50 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_selection_anchor = Some(30);
+        app.log_selection_cursor = 30;
+        app.log_scroll_offset = Some(25);
+
+        app.move_log_cursor_with_height(-10, 10);
+        assert_eq!(app.log_selection_cursor, 20);
+        assert_eq!(app.log_scroll_offset, Some(20));
+    }
+
+    #[tokio::test]
+    async fn exit_visual_mode_clears_anchor() {
+        let mut app = App::new_test();
+        app.log_selection_anchor = Some(3);
+        app.log_selection_cursor = 7;
+        app.mode = AppMode::LogVisualSelect;
+
+        app.exit_log_visual_mode();
+
+        assert!(app.log_selection_anchor.is_none());
+        assert_eq!(app.mode, AppMode::LogView);
+    }
+
+    #[tokio::test]
+    async fn log_cursor_top_and_bottom() {
+        let mut app = App::new_test();
+        for i in 0..10 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_selection_anchor = Some(5);
+        app.log_selection_cursor = 5;
+
+        app.log_cursor_top();
+        assert_eq!(app.log_selection_cursor, 0);
+
+        app.log_cursor_bottom();
+        assert_eq!(app.log_selection_cursor, 9);
+    }
+
+    #[tokio::test]
+    async fn merge_log_history_shifts_selection() {
+        let mut app = App::new_test();
+        app.log_generation = 1;
+        app.log_tail_lines = 200;
+        for line in ["line3", "line4", "line5"] {
+            app.log_buffer.push_back(line.to_string());
+        }
+        app.log_selection_anchor = Some(0);
+        app.log_selection_cursor = 1;
+        app.log_loading_history = true;
+
+        app.merge_log_history(
+            1,
+            vec![
+                "line1".into(),
+                "line2".into(),
+                "line3".into(),
+                "line4".into(),
+                "line5".into(),
+            ],
+        );
+
+        assert_eq!(app.log_selection_anchor, Some(2));
+        assert_eq!(app.log_selection_cursor, 3);
+    }
+
+    #[tokio::test]
+    async fn push_log_line_eviction_shifts_selection() {
+        let mut app = App::new_test();
+        for i in 0..MAX_LOG_LINES {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_selection_anchor = Some(10);
+        app.log_selection_cursor = 20;
+
+        app.push_log_line("new".into());
+
+        assert_eq!(app.log_selection_anchor, Some(9));
+        assert_eq!(app.log_selection_cursor, 19);
+    }
+
+    #[tokio::test]
+    async fn push_log_line_eviction_invalidates_selection_at_edge() {
+        let mut app = App::new_test();
+        for i in 0..MAX_LOG_LINES {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_selection_anchor = Some(0);
+        app.log_selection_cursor = 5;
+
+        app.push_log_line("new".into());
+
+        assert!(app.log_selection_anchor.is_none());
+    }
+
+    #[tokio::test]
+    async fn push_log_line_no_eviction_keeps_selection() {
+        let mut app = App::new_test();
+        for i in 0..10 {
+            app.log_buffer.push_back(format!("line{i}"));
+        }
+        app.log_selection_anchor = Some(3);
+        app.log_selection_cursor = 7;
+
+        app.push_log_line("new".into());
+
+        assert_eq!(app.log_selection_anchor, Some(3));
+        assert_eq!(app.log_selection_cursor, 7);
+    }
+
+    #[tokio::test]
+    async fn stream_logs_resets_selection() {
+        let mut app = App::new_test();
+        app.log_selection_anchor = Some(3);
+        app.log_selection_cursor = 7;
+        app.mode = AppMode::LogVisualSelect;
+
+        app.stream_logs("pod", "ns");
+
+        assert!(app.log_selection_anchor.is_none());
+        assert_eq!(app.log_selection_cursor, 0);
+        assert_eq!(app.mode, AppMode::LogView);
+    }
+
+    #[tokio::test]
+    async fn build_log_selection_text_joins_with_newlines() {
+        let mut app = App::new_test();
+        for line in ["alpha", "bravo", "charlie", "delta"] {
+            app.log_buffer.push_back(line.to_string());
+        }
+        app.log_selection_anchor = Some(1);
+        app.log_selection_cursor = 2;
+
+        let (count, text) = app.build_log_selection_text().unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(text, "bravo\ncharlie");
+        assert!(!text.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn build_log_selection_text_single_line() {
+        let mut app = App::new_test();
+        app.log_buffer.push_back("only".to_string());
+        app.log_selection_anchor = Some(0);
+        app.log_selection_cursor = 0;
+
+        let (count, text) = app.build_log_selection_text().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(text, "only");
+    }
+
+    #[tokio::test]
+    async fn build_log_selection_text_none_without_anchor() {
+        let app = App::new_test();
+        assert!(app.build_log_selection_text().is_none());
     }
 }
