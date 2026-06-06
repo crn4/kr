@@ -545,7 +545,7 @@ impl App {
         self.log_history_task = Some(handle);
     }
 
-    pub fn merge_log_history(&mut self, generation: u64, lines: Vec<String>) {
+    pub fn merge_log_history(&mut self, generation: u64, mut lines: Vec<String>) {
         if generation != self.log_generation {
             self.log_loading_history = false;
             return;
@@ -555,13 +555,25 @@ impl App {
             self.log_history_exhausted = true;
         }
 
-        let overlap_idx = self
-            .log_buffer
-            .front()
-            .and_then(|first| lines.iter().rposition(|l| l == first))
-            .unwrap_or(lines.len());
+        let mut overlap_idx = lines.len();
+        let buffer_len = self.log_buffer.len();
+        if buffer_len > 0 && !lines.is_empty() {
+            let max_k = lines.len().min(buffer_len);
+            if let Some(last_line) = lines.last() {
+                for idx in (0..max_k).rev() {
+                    if self.log_buffer[idx] == *last_line {
+                        let k = idx + 1;
+                        let suffix = &lines[lines.len() - k..];
+                        if suffix.iter().zip(self.log_buffer.iter().take(k)).all(|(a, b)| a == b) {
+                            overlap_idx = lines.len() - k;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
-        let available = MAX_LOG_LINES.saturating_sub(self.log_buffer.len());
+        let available = MAX_LOG_LINES.saturating_sub(buffer_len);
         let prepend_count = overlap_idx.min(available);
 
         if prepend_count == 0 {
@@ -572,8 +584,8 @@ impl App {
         }
 
         let start = overlap_idx - prepend_count;
-        for line in lines[start..overlap_idx].iter().rev() {
-            self.log_buffer.push_front(line.clone());
+        for line in lines.drain(start..overlap_idx).rev() {
+            self.log_buffer.push_front(line);
         }
 
         if let Some(offset) = &mut self.log_scroll_offset {
@@ -1521,6 +1533,37 @@ mod tests {
         app.merge_log_history(1, history);
 
         assert_eq!(app.log_buffer.len(), 5);
+        assert_eq!(app.log_buffer[0], "line1");
+        assert_eq!(app.log_buffer[1], "line2");
+        assert_eq!(app.log_buffer[2], "line3");
+        assert_eq!(app.log_scroll_offset, Some(2));
+        assert!(!app.log_loading_history);
+    }
+
+    #[tokio::test]
+    async fn merge_log_history_prepends_new_lines_large_overlap() {
+        let mut app = App::new_test();
+        app.log_generation = 1;
+        app.log_tail_lines = 200;
+        for line in ["line3", "line4", "line5", "line6", "line7", "line8"] {
+            app.log_buffer.push_back(line.to_string());
+        }
+        app.log_scroll_offset = Some(0);
+        app.log_loading_history = true;
+
+        let history = vec![
+            "line1".into(),
+            "line2".into(),
+            "line3".into(),
+            "line4".into(),
+            "line5".into(),
+            "line6".into(),
+            "line7".into(),
+            "line8".into(),
+        ];
+        app.merge_log_history(1, history);
+
+        assert_eq!(app.log_buffer.len(), 8);
         assert_eq!(app.log_buffer[0], "line1");
         assert_eq!(app.log_buffer[1], "line2");
         assert_eq!(app.log_buffer[2], "line3");

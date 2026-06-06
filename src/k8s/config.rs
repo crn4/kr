@@ -48,3 +48,11 @@ pub async fn create_client_with_context(context: &str) -> Result<Client> {
     let client = Client::try_from(config)?;
     Ok(client)
 }
+
+pub async fn get_namespace_for_context_async(context: String) -> String {
+    tokio::task::spawn_blocking(move || {
+        get_namespace_for_context(&context)
+    })
+    .await
+    .unwrap_or_else(|_| "default".to_string())
+}

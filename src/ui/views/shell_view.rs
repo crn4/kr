@@ -27,10 +27,16 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     for row in 0..rows.min(inner_height) {
         let mut spans: Vec<Span> = Vec::new();
-        let mut col = 0u16;
-        while col < cols.min(inner_width) {
+        let mut current_style = Style::default();
+        let mut space_count = 0;
+        let mut text_buf = String::new();
+
+        let cols_limit = cols.min(inner_width);
+        for col in 0..cols_limit {
             let cell = screen.cell(row, col);
-            let (content, style) = match cell {
+            let is_cursor = row == cursor.0 && col == cursor.1;
+
+            let (contents, mut style) = match cell {
                 Some(cell) => {
                     let mut s = Style::default();
                     s = s.fg(convert_color(cell.fgcolor()));
@@ -44,22 +50,55 @@ pub fn draw(f: &mut Frame, app: &App) {
                     if cell.inverse() {
                         s = s.add_modifier(Modifier::REVERSED);
                     }
-                    let text = cell.contents();
-                    if text.is_empty() {
-                        (" ".to_owned(), s)
+                    let txt = cell.contents();
+                    if txt.is_empty() {
+                        (None, s)
                     } else {
-                        (text.to_owned(), s)
+                        (Some(txt), s)
                     }
                 }
-                None => (" ".to_owned(), Style::default()),
+                None => (None, Style::default()),
             };
-            let style = if row == cursor.0 && col == cursor.1 {
-                style.add_modifier(Modifier::REVERSED)
+
+            let txt_ref = contents.unwrap_or(" ");
+            let cell_is_space = txt_ref == " ";
+
+            if is_cursor {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+
+            let style_changed = col > 0 && style != current_style;
+
+            if style_changed {
+                if space_count > 0 {
+                    spans.push(Span::styled(get_spaces(space_count), current_style));
+                    space_count = 0;
+                } else if !text_buf.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text_buf), current_style));
+                }
+                current_style = style;
+            }
+
+            if text_buf.is_empty() && cell_is_space {
+                if col == 0 {
+                    current_style = style;
+                }
+                space_count += 1;
             } else {
-                style
-            };
-            spans.push(Span::styled(content, style));
-            col += 1;
+                if col == 0 {
+                    current_style = style;
+                }
+                if space_count > 0 {
+                    text_buf.push_str(get_spaces(space_count));
+                    space_count = 0;
+                }
+                text_buf.push_str(txt_ref);
+            }
+        }
+        if space_count > 0 {
+            spans.push(Span::styled(get_spaces(space_count), current_style));
+        } else if !text_buf.is_empty() {
+            spans.push(Span::styled(text_buf, current_style));
         }
         lines.push(Line::from(spans));
     }
@@ -84,4 +123,9 @@ fn convert_color(c: vt100::Color) -> ratatui::style::Color {
         vt100::Color::Idx(i) => ratatui::style::Color::Indexed(i),
         vt100::Color::Rgb(r, g, b) => ratatui::style::Color::Rgb(r, g, b),
     }
+}
+
+fn get_spaces(n: usize) -> &'static str {
+    const SPACES: &str = "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                ";
+    &SPACES[..n.min(SPACES.len())]
 }

@@ -11,14 +11,18 @@ pub fn draw(f: &mut Frame, app: &App) {
     let area = centered_rect(90, 90, f.area());
     f.render_widget(Clear, area);
 
-    let lines: Vec<Line> = app.describe_content.iter().map(Line::raw).collect();
+    let total_lines = app.describe_content.len();
+    let visible_height = area.height.saturating_sub(2) as usize;
 
-    let total_lines = lines.len() as u16;
-    let visible_height = area.height.saturating_sub(2);
+    let scroll = app.describe_scroll.min(total_lines.saturating_sub(visible_height));
+    let end = (scroll + visible_height).min(total_lines);
 
-    let scroll = (app.describe_scroll as u16).min(total_lines.saturating_sub(visible_height));
+    let lines: Vec<Line> = app.describe_content[scroll..end]
+        .iter()
+        .map(|l| Line::raw(l.as_str()))
+        .collect();
 
-    let title = format!("Describe [{} lines]", app.describe_content.len());
+    let title = format!("Describe [{} lines]", total_lines);
 
     let paragraph = Paragraph::new(lines)
         .block(
@@ -28,7 +32,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .style(STYLE_NORMAL),
         )
         .style(STYLE_NORMAL)
-        .scroll((scroll, app.describe_hscroll as u16));
+        .scroll((0, app.describe_hscroll as u16));
 
     f.render_widget(paragraph, area);
 }

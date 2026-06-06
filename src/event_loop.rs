@@ -273,7 +273,7 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
                 Ok(client) => {
                     app.stop_all_port_forwards();
                     app.client = client;
-                    app.current_namespace = crate::k8s::config::get_namespace_for_context(&new_ctx);
+                    app.current_namespace = crate::k8s::config::get_namespace_for_context_async(new_ctx.clone()).await;
                     app.current_context = new_ctx.clone();
 
                     app.available_namespaces = app.app_state.get_namespaces(&new_ctx);
