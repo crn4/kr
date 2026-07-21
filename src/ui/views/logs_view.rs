@@ -154,7 +154,10 @@ mod tests {
     #[test]
     fn multiple_matches() {
         let line = highlight_line("err foo err bar err", "err");
-        assert_eq!(span_texts(&line), vec!["err", " foo ", "err", " bar ", "err"]);
+        assert_eq!(
+            span_texts(&line),
+            vec!["err", " foo ", "err", " bar ", "err"]
+        );
         assert!(is_highlighted(&line.spans[0]));
         assert!(!is_highlighted(&line.spans[1]));
         assert!(is_highlighted(&line.spans[2]));

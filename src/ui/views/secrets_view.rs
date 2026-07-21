@@ -12,7 +12,11 @@ use ratatui::{
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let sort_col = app.active_sort_column();
     let sort_ind = app.active_sort_direction().indicator();
-    let cols = build_sort_header(&["", "Name", "Type", "Data Count", "Age"], sort_col, sort_ind);
+    let cols = build_sort_header(
+        &["", "Name", "Type", "Data Count", "Age"],
+        sort_col,
+        sort_ind,
+    );
     let header_cells = cols
         .iter()
         .map(|h| Cell::from(h.as_ref()).style(Style::default().fg(COLOR_HIGHLIGHT)));

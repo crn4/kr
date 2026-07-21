@@ -74,8 +74,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         });
     f.render_widget(tabs, tab_row[0]);
 
-    let version = Paragraph::new(version_label)
-        .style(Style::default().fg(COLOR_VERSION));
+    let version = Paragraph::new(version_label).style(Style::default().fg(COLOR_VERSION));
     f.render_widget(version, tab_row[1]);
 
     let filter_part = if app.filter_query.is_empty() {

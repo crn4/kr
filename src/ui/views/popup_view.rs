@@ -191,7 +191,10 @@ fn draw_port_forward_list(f: &mut Frame, app: &mut App) {
             let local_part = format!("localhost:{}", pf.local_port);
             let rest = &text[local_part.len()..];
             ListItem::new(Line::from(vec![
-                Span::styled(local_part, Style::default().fg(crate::ui::theme::COLOR_HIGHLIGHT)),
+                Span::styled(
+                    local_part,
+                    Style::default().fg(crate::ui::theme::COLOR_HIGHLIGHT),
+                ),
                 Span::styled(rest, STYLE_NORMAL),
             ]))
         })

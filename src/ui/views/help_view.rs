@@ -23,36 +23,51 @@ const BORDER_CHROME: u16 = 2;
 type Binding = (&'static str, &'static str);
 type Section = (&'static str, &'static [Binding]);
 
-static LIST_NAVIGATION: Section = ("Navigation", &[
-    ("j/k ↑/↓     ", "Navigate up/down"),
-    ("g / G        ", "Top / Bottom"),
-    ("PgUp/PgDn    ", "Page scroll"),
-]);
+static LIST_NAVIGATION: Section = (
+    "Navigation",
+    &[
+        ("j/k ↑/↓     ", "Navigate up/down"),
+        ("g / G        ", "Top / Bottom"),
+        ("PgUp/PgDn    ", "Page scroll"),
+    ],
+);
 
-static LIST_SELECTION: Section = ("Selection", &[
-    ("Space        ", "Toggle select"),
-    ("Ctrl+A       ", "Select/deselect all"),
-]);
+static LIST_SELECTION: Section = (
+    "Selection",
+    &[
+        ("Space        ", "Toggle select"),
+        ("Ctrl+A       ", "Select/deselect all"),
+    ],
+);
 
-static LIST_VIEW: Section = ("View", &[
-    ("/            ", "Filter"),
-    ("o / O        ", "Cycle sort / Toggle direction"),
-    ("Tab/S+Tab    ", "Next/Previous tab"),
-    ("w            ", "Toggle wide/compact"),
-]);
+static LIST_VIEW: Section = (
+    "View",
+    &[
+        ("/            ", "Filter"),
+        ("o / O        ", "Cycle sort / Toggle direction"),
+        ("Tab/S+Tab    ", "Next/Previous tab"),
+        ("w            ", "Toggle wide/compact"),
+    ],
+);
 
-static LIST_ACTIONS: Section = ("Actions", &[
-    ("d            ", "Describe resource"),
-    ("e            ", "Edit resource"),
-    ("D / Del      ", "Delete resource"),
-]);
+static LIST_ACTIONS: Section = (
+    "Actions",
+    &[
+        ("d            ", "Describe resource"),
+        ("e            ", "Edit resource"),
+        ("D / Del      ", "Delete resource"),
+    ],
+);
 
-static LIST_GLOBAL: Section = ("Global", &[
-    ("c            ", "Switch context (⚡ = Teleport login)"),
-    ("n            ", "Switch namespace"),
-    ("P            ", "Active port forwards"),
-    ("q / Ctrl+C   ", "Quit"),
-]);
+static LIST_GLOBAL: Section = (
+    "Global",
+    &[
+        ("c            ", "Switch context (⚡ = Teleport login)"),
+        ("n            ", "Switch namespace"),
+        ("P            ", "Active port forwards"),
+        ("q / Ctrl+C   ", "Quit"),
+    ],
+);
 
 static POD_ACTIONS: &[Binding] = &[
     ("f            ", "Filter by status"),
@@ -67,64 +82,67 @@ static DEPLOYMENT_ACTIONS: &[Binding] = &[
     ("r            ", "Rollout restart"),
 ];
 
-static SECRET_ACTIONS: &[Binding] = &[
-    ("Enter / x    ", "Decode secret"),
-];
+static SECRET_ACTIONS: &[Binding] = &[("Enter / x    ", "Decode secret")];
 
 static LOG_SECTIONS: &[Section] = &[
-    ("Navigation", &[
-        ("j/k ↑/↓     ", "Scroll up/down"),
-        ("h/l ←/→     ", "Pan left/right"),
-        ("PgUp/PgDn    ", "Page scroll"),
-        ("g            ", "Jump to top"),
-        ("G            ", "Follow (jump to bottom)"),
-        ("0            ", "Pan to left edge"),
-    ]),
-    ("Search", &[
-        ("/            ", "Search"),
-        ("n            ", "Next match (older)"),
-        ("N            ", "Prev match (newer)"),
-        ("Esc          ", "Clear search"),
-    ]),
-    ("Selection", &[
-        ("V            ", "Enter visual mode"),
-    ]),
-    ("", &[
-        ("q / Esc      ", "Back to list"),
-    ]),
+    (
+        "Navigation",
+        &[
+            ("j/k ↑/↓     ", "Scroll up/down"),
+            ("h/l ←/→     ", "Pan left/right"),
+            ("PgUp/PgDn    ", "Page scroll"),
+            ("g            ", "Jump to top"),
+            ("G            ", "Follow (jump to bottom)"),
+            ("0            ", "Pan to left edge"),
+        ],
+    ),
+    (
+        "Search",
+        &[
+            ("/            ", "Search"),
+            ("n            ", "Next match (older)"),
+            ("N            ", "Prev match (newer)"),
+            ("Esc          ", "Clear search"),
+        ],
+    ),
+    ("Selection", &[("V            ", "Enter visual mode")]),
+    ("", &[("q / Esc      ", "Back to list")]),
 ];
 
-static LOG_VISUAL_SECTIONS: &[Section] = &[
-    ("Selection", &[
+static LOG_VISUAL_SECTIONS: &[Section] = &[(
+    "Selection",
+    &[
         ("j/k ↑/↓     ", "Extend selection"),
         ("PgUp/PgDn    ", "Extend by page"),
         ("g / G        ", "Top / Bottom"),
         ("y / Enter    ", "Copy selection (15s)"),
         ("V / Esc / q  ", "Cancel"),
-    ]),
-];
+    ],
+)];
 
 static DESCRIBE_SECTIONS: &[Section] = &[
-    ("Navigation", &[
-        ("j/k ↑/↓     ", "Scroll up/down"),
-        ("h/l ←/→     ", "Pan left/right"),
-        ("PgUp/PgDn    ", "Page scroll"),
-        ("g / G        ", "Top / Bottom"),
-        ("0            ", "Pan to left edge"),
-    ]),
-    ("", &[
-        ("q / Esc      ", "Close"),
-    ]),
+    (
+        "Navigation",
+        &[
+            ("j/k ↑/↓     ", "Scroll up/down"),
+            ("h/l ←/→     ", "Pan left/right"),
+            ("PgUp/PgDn    ", "Page scroll"),
+            ("g / G        ", "Top / Bottom"),
+            ("0            ", "Pan to left edge"),
+        ],
+    ),
+    ("", &[("q / Esc      ", "Close")]),
 ];
 
-static SECRET_SECTIONS: &[Section] = &[
-    ("", &[
+static SECRET_SECTIONS: &[Section] = &[(
+    "",
+    &[
         ("j/k ↑/↓     ", "Scroll up/down"),
         ("r            ", "Reveal/hide values"),
         ("c            ", "Copy value to clipboard"),
         ("q / Esc      ", "Close"),
-    ]),
-];
+    ],
+)];
 
 pub fn draw(f: &mut Frame, app: &App) {
     let sections = sections_for_mode(app);
@@ -254,9 +272,7 @@ fn build_lines<'a>(sections: &'a [Section], scroll: usize, visible: usize) -> Ve
 pub fn max_scroll(app: &App) -> usize {
     let sections = sections_for_mode(app);
     let total = count_lines(sections);
-    let height = crossterm::terminal::size()
-        .map(|(_, h)| h)
-        .unwrap_or(24);
+    let height = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
     let popup_height = (total as u16 + BORDER_CHROME).min(height);
     let visible = popup_height.saturating_sub(BORDER_CHROME) as usize;
     total.saturating_sub(visible)
@@ -321,13 +337,14 @@ mod tests {
 
     #[test]
     fn build_lines_respects_scroll_and_visible() {
-        let sections: &[Section] = &[
-            ("Section", &[
+        let sections: &[Section] = &[(
+            "Section",
+            &[
                 ("a            ", "desc a"),
                 ("b            ", "desc b"),
                 ("c            ", "desc c"),
-            ]),
-        ];
+            ],
+        )];
         let lines = build_lines(sections, 1, 2);
         assert_eq!(lines.len(), 2);
     }

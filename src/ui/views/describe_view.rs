@@ -14,7 +14,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     let total_lines = app.describe_content.len();
     let visible_height = area.height.saturating_sub(2) as usize;
 
-    let scroll = app.describe_scroll.min(total_lines.saturating_sub(visible_height));
+    let scroll = app
+        .describe_scroll
+        .min(total_lines.saturating_sub(visible_height));
     let end = (scroll + visible_height).min(total_lines);
 
     let lines: Vec<Line> = app.describe_content[scroll..end]

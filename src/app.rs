@@ -279,8 +279,7 @@ impl App {
         let col = self.active_sort_column();
         let dir = self.active_sort_direction();
         self.items.sort_unstable_by(|a, b| {
-            let ord = Self::compare_by_column(a, b, col)
-                .then_with(|| a.name().cmp(b.name()));
+            let ord = Self::compare_by_column(a, b, col).then_with(|| a.name().cmp(b.name()));
             match dir {
                 SortDirection::Asc => ord,
                 SortDirection::Desc => ord.reverse(),
@@ -288,11 +287,7 @@ impl App {
         });
     }
 
-    fn compare_by_column(
-        a: &KubeResource,
-        b: &KubeResource,
-        col: usize,
-    ) -> std::cmp::Ordering {
+    fn compare_by_column(a: &KubeResource, b: &KubeResource, col: usize) -> std::cmp::Ordering {
         match a {
             KubeResource::Pod(pa) => {
                 let KubeResource::Pod(pb) = b else {
@@ -315,11 +310,7 @@ impl App {
         }
     }
 
-    fn compare_pods(
-        a: &Pod,
-        b: &Pod,
-        col: usize,
-    ) -> std::cmp::Ordering {
+    fn compare_pods(a: &Pod, b: &Pod, col: usize) -> std::cmp::Ordering {
         match col {
             0 => {
                 let na = a.metadata.name.as_deref().unwrap_or_default();
@@ -348,11 +339,7 @@ impl App {
         }
     }
 
-    fn compare_deployments(
-        a: &Deployment,
-        b: &Deployment,
-        col: usize,
-    ) -> std::cmp::Ordering {
+    fn compare_deployments(a: &Deployment, b: &Deployment, col: usize) -> std::cmp::Ordering {
         match col {
             0 => {
                 let na = a.metadata.name.as_deref().unwrap_or_default();
@@ -360,18 +347,36 @@ impl App {
                 na.cmp(nb)
             }
             1 => {
-                let ra = a.status.as_ref().map_or(0, |s| s.ready_replicas.unwrap_or(0));
-                let rb = b.status.as_ref().map_or(0, |s| s.ready_replicas.unwrap_or(0));
+                let ra = a
+                    .status
+                    .as_ref()
+                    .map_or(0, |s| s.ready_replicas.unwrap_or(0));
+                let rb = b
+                    .status
+                    .as_ref()
+                    .map_or(0, |s| s.ready_replicas.unwrap_or(0));
                 ra.cmp(&rb)
             }
             2 => {
-                let ua = a.status.as_ref().map_or(0, |s| s.updated_replicas.unwrap_or(0));
-                let ub = b.status.as_ref().map_or(0, |s| s.updated_replicas.unwrap_or(0));
+                let ua = a
+                    .status
+                    .as_ref()
+                    .map_or(0, |s| s.updated_replicas.unwrap_or(0));
+                let ub = b
+                    .status
+                    .as_ref()
+                    .map_or(0, |s| s.updated_replicas.unwrap_or(0));
                 ua.cmp(&ub)
             }
             3 => {
-                let aa = a.status.as_ref().map_or(0, |s| s.available_replicas.unwrap_or(0));
-                let ab = b.status.as_ref().map_or(0, |s| s.available_replicas.unwrap_or(0));
+                let aa = a
+                    .status
+                    .as_ref()
+                    .map_or(0, |s| s.available_replicas.unwrap_or(0));
+                let ab = b
+                    .status
+                    .as_ref()
+                    .map_or(0, |s| s.available_replicas.unwrap_or(0));
                 aa.cmp(&ab)
             }
             _ => Self::compare_creation_timestamp(
@@ -381,11 +386,7 @@ impl App {
         }
     }
 
-    fn compare_secrets(
-        a: &Secret,
-        b: &Secret,
-        col: usize,
-    ) -> std::cmp::Ordering {
+    fn compare_secrets(a: &Secret, b: &Secret, col: usize) -> std::cmp::Ordering {
         match col {
             0 => {
                 let na = a.metadata.name.as_deref().unwrap_or_default();
@@ -577,7 +578,11 @@ impl App {
                     if self.log_buffer[idx] == *last_line {
                         let k = idx + 1;
                         let suffix = &lines[lines.len() - k..];
-                        if suffix.iter().zip(self.log_buffer.iter().take(k)).all(|(a, b)| a == b) {
+                        if suffix
+                            .iter()
+                            .zip(self.log_buffer.iter().take(k))
+                            .all(|(a, b)| a == b)
+                        {
                             overlap_idx = lines.len() - k;
                             break;
                         }
@@ -1171,7 +1176,9 @@ impl App {
         }
         let last = self.log_buffer.len() - 1;
         let new_cursor = if delta >= 0 {
-            self.log_selection_cursor.saturating_add(delta as usize).min(last)
+            self.log_selection_cursor
+                .saturating_add(delta as usize)
+                .min(last)
         } else {
             self.log_selection_cursor.saturating_sub((-delta) as usize)
         };
