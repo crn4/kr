@@ -14,7 +14,16 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let sort_col = app.active_sort_column();
     let sort_ind = app.active_sort_direction().indicator();
     let base: &[&str] = if wide {
-        &["", "Name", "Ready", "Up-to-date", "Available", "Age", "Strategy", "Images"]
+        &[
+            "",
+            "Name",
+            "Ready",
+            "Up-to-date",
+            "Available",
+            "Age",
+            "Strategy",
+            "Images",
+        ]
     } else {
         &["", "Name", "Ready", "Up-to-date", "Available", "Age"]
     };
@@ -84,9 +93,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 cells.push(Cell::from(strategy));
                 cells.push(Cell::from(images));
             }
-            Row::new(cells)
-                .height(1)
-                .style(STYLE_NORMAL)
+            Row::new(cells).height(1).style(STYLE_NORMAL)
         })
         .collect();
 
@@ -119,7 +126,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     if app.filtered_items.is_empty() && !app.is_active_tab_loading() {
-        let msg = if app.last_error.is_some() {
+        let msg = if !app.has_namespace() {
+            "No namespace selected — press n to choose one"
+        } else if app.last_error.is_some() {
             ""
         } else if app.filter_query.is_empty() {
             "No deployments in this namespace"

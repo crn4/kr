@@ -14,7 +14,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let sort_col = app.active_sort_column();
     let sort_ind = app.active_sort_direction().indicator();
     let base: &[&str] = if wide {
-        &["", "Name", "Ready", "Status", "Restarts", "Age", "IP", "Node", "Image"]
+        &[
+            "", "Name", "Ready", "Status", "Restarts", "Age", "IP", "Node", "Image",
+        ]
     } else {
         &["", "Name", "Ready", "Status", "Restarts", "Age"]
     };
@@ -36,8 +38,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let marker = if selected { "●" } else { " " };
 
             let KubeResource::Pod(p) = item else {
-                return Row::new(vec![Cell::from(marker), Cell::from(item.name())])
-                    .height(1);
+                return Row::new(vec![Cell::from(marker), Cell::from(item.name())]).height(1);
             };
 
             let name = p.metadata.name.as_deref().unwrap_or_default();
@@ -75,9 +76,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(age),
             ];
             if wide {
-                let ip = status_obj
-                    .and_then(|s| s.pod_ip.as_deref())
-                    .unwrap_or("-");
+                let ip = status_obj.and_then(|s| s.pod_ip.as_deref()).unwrap_or("-");
                 let node = p
                     .spec
                     .as_ref()
@@ -132,7 +131,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     if app.filtered_items.is_empty() && !app.is_active_tab_loading() {
-        let msg = if app.last_error.is_some() {
+        let msg = if !app.has_namespace() {
+            "No namespace selected — press n to choose one"
+        } else if app.last_error.is_some() {
             ""
         } else if app.filter_query.is_empty() && app.status_filter.is_empty() {
             "No pods in this namespace"

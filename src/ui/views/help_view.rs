@@ -48,7 +48,7 @@ static LIST_ACTIONS: Section = ("Actions", &[
 ]);
 
 static LIST_GLOBAL: Section = ("Global", &[
-    ("c            ", "Switch context"),
+    ("c            ", "Switch context (⚡ = Teleport login)"),
     ("n            ", "Switch namespace"),
     ("P            ", "Active port forwards"),
     ("q / Ctrl+C   ", "Quit"),

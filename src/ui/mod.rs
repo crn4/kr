@@ -19,9 +19,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(0),    // Main
-            Constraint::Length(1), // Footer
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
         ])
         .split(f.area());
 
@@ -97,7 +97,11 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let info_text = format!(
         " Ctx: {} | NS: {} | Items: {}{}{}",
         app.current_context,
-        app.current_namespace,
+        if app.has_namespace() {
+            app.current_namespace.as_str()
+        } else {
+            "<none>"
+        },
         app.filtered_items.len(),
         filter_part,
         status_part,
@@ -227,8 +231,8 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         .map(|a| a.message())
         .unwrap_or_else(|| "Confirm action?".to_string());
     let max_line = msg.lines().map(|l| l.len()).max().unwrap_or(15);
-    let w = (max_line as u16 + 4).max(30); // +2 borders, +2 padding
-    let h = (msg.lines().count() as u16 + 4).max(7); // +2 borders, +2 for [y/n] line
+    let w = (max_line as u16 + 4).max(30);
+    let h = (msg.lines().count() as u16 + 4).max(7);
     let area = centered_fixed_rect(w, h, f.area());
     f.render_widget(Clear, area);
 
