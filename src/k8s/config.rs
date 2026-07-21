@@ -12,31 +12,26 @@ pub fn get_current_context() -> Result<String> {
     Ok(config.current_context.unwrap_or_default())
 }
 
-pub fn get_context_namespace() -> Result<String> {
+pub fn get_context_namespace() -> Result<Option<String>> {
     let config = Kubeconfig::read()?;
     let ctx_name = config.current_context.as_deref().unwrap_or_default();
-    let ns = config
+    Ok(config
         .contexts
         .iter()
         .find(|c| c.name == ctx_name)
         .and_then(|c| c.context.as_ref())
-        .and_then(|c| c.namespace.clone())
-        .unwrap_or_else(|| "default".to_string());
-    Ok(ns)
+        .and_then(|c| c.namespace.clone()))
 }
 
-pub fn get_namespace_for_context(context: &str) -> String {
-    Kubeconfig::read()
-        .ok()
-        .and_then(|config| {
-            config
-                .contexts
-                .iter()
-                .find(|c| c.name == context)
-                .and_then(|c| c.context.as_ref())
-                .and_then(|c| c.namespace.clone())
-        })
-        .unwrap_or_else(|| "default".to_string())
+pub fn configured_namespace_for_context(context: &str) -> Option<String> {
+    Kubeconfig::read().ok().and_then(|config| {
+        config
+            .contexts
+            .iter()
+            .find(|c| c.name == context)
+            .and_then(|c| c.context.as_ref())
+            .and_then(|c| c.namespace.clone())
+    })
 }
 
 pub async fn create_client_with_context(context: &str) -> Result<Client> {
@@ -49,10 +44,16 @@ pub async fn create_client_with_context(context: &str) -> Result<Client> {
     Ok(client)
 }
 
-pub async fn get_namespace_for_context_async(context: String) -> String {
-    tokio::task::spawn_blocking(move || {
-        get_namespace_for_context(&context)
-    })
-    .await
-    .unwrap_or_else(|_| "default".to_string())
+pub async fn list_contexts_async() -> Option<Vec<String>> {
+    tokio::task::spawn_blocking(|| list_contexts().ok())
+        .await
+        .ok()
+        .flatten()
+}
+
+pub async fn configured_namespace_for_context_async(context: String) -> Option<String> {
+    tokio::task::spawn_blocking(move || configured_namespace_for_context(&context))
+        .await
+        .ok()
+        .flatten()
 }

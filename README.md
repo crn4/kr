@@ -18,10 +18,12 @@ A fast, lightweight Kubernetes TUI built in Rust.
 - **Wide view** — toggle extended columns (IP, Node, Image, etc.) with `w`
 - **Fuzzy filter** — type `/` to filter resources by name
 - **Context & namespace switching** — switch clusters and namespaces without leaving the TUI
+- **Teleport support** — log into `tsh` clusters straight from the context picker, no `tsh kube login` beforehand
+- **Namespace discovery** — finds your namespaces even without cluster-wide `list namespaces` permission
 - **Describe & edit** — `kubectl describe` and `kubectl edit` in embedded views
 - **RBAC-aware** — graceful handling of 403 Forbidden errors
 - **Loading feedback** — animated spinner with elapsed time
-- **Persistent state** — remembers namespaces per context across sessions
+- **Persistent state** — remembers namespaces and your last namespace per context across sessions
 
 ## Installation
 
@@ -72,6 +74,9 @@ kr -c "get pods -n kube-system"
 |-----|--------|
 | `c` | Switch context (cluster) |
 | `n` | Switch namespace |
+
+In the context picker, entries marked `⚡` are Teleport clusters you have access to but are not
+logged into yet — see [Teleport](#teleport).
 
 ### Pods
 
@@ -145,25 +150,61 @@ Press `V` in the log view to select one or more lines to copy.
 | `d` / `Delete` | Stop selected forward |
 | `Esc` | Close |
 
+## Teleport
+
+Entirely optional. Without `tsh` installed, kr behaves exactly as a plain kubeconfig client and
+none of this applies.
+
+When `tsh` is present and you have an active Teleport session, the context picker (`c`) also lists
+clusters you have access to but have **not** run `tsh kube login` for. They appear as
+`⚡ cluster-name (teleport)`. Selecting one runs the login for you — kr drops out of the TUI so MFA
+prompts and browser redirects work normally — then switches to the new context. If your Teleport
+session has expired, the picker offers `⚡ Log in to Teleport` instead.
+
+kr never files access requests on your behalf: `tsh kube login` is always invoked with
+`--disable-access-request`, since selecting a row in a list should not create a server-side
+approval request.
+
+## Namespaces
+
+Some clusters grant access to individual namespaces without allowing `list namespaces` at the
+cluster scope, which normally leaves the namespace picker empty. kr tries three sources in order:
+
+1. the Kubernetes API
+2. `kubectl get namespaces`
+3. your Teleport role grants, read locally from `tsh status`
+
+Source 3 is a union across all your Teleport roles, so kr narrows it to the namespaces that
+actually work in the current cluster by asking the cluster what you are allowed to do in each one
+(`SelfSubjectRulesReview`, which needs no special permission).
+
+kr does not invent a namespace. If nothing is known yet, none is selected and no requests are made
+— so you get an empty view instead of a confusing permission error. Once the list is known:
+
+- exactly one namespace, or a confirmed `default` → selected automatically
+- otherwise → the namespace picker opens
+
+Your choice is remembered per context, so later switches land where you left off.
+
 ## Requirements
 
 - Rust 1.75+ (to build from source)
 - `kubectl` configured with a valid kubeconfig
 - `kubectl` binary in PATH (for describe, edit, CLI mode)
+- `tsh` in PATH — optional, only for [Teleport](#teleport) clusters
 
 ## Configuration
 
-kr stores persistent state (namespace history per context) in:
+kr stores persistent state (namespace history and last namespace per context) in `kr/state.json`,
+and TUI logs in `kr/kr.log`, under your platform's config directory:
 
-```
-~/.config/kr/state.json
-```
+| Platform | Directory |
+|----------|-----------|
+| Linux | `$XDG_CONFIG_HOME/kr` or `~/.config/kr` |
+| macOS | `~/Library/Application Support/kr` |
+| Windows | `%APPDATA%\kr` |
 
-Logs (TUI mode) are written to:
-
-```
-~/.config/kr/kr.log
-```
+The log is rotated to `kr.log.1` at startup once it exceeds 16 MB.
 
 ## License
 

@@ -1,5 +1,6 @@
 use crate::models::{
-    AppMode, KubeResource, KubeResourceEvent, PendingAction, ResourceType, SortDirection,
+    AppMode, ContextEntry, KubeResource, KubeResourceEvent, NamespaceOrigin, PendingAction,
+    ResourceType, SortDirection,
 };
 use crate::state::AppState;
 use k8s_openapi::api::{
@@ -34,6 +35,7 @@ pub struct ActivePortForward {
 
 pub(crate) const MAX_LOG_LINES: usize = 10_000;
 pub(crate) const LOG_CHROME_LINES: usize = 6;
+pub(crate) const DEFAULT_NAMESPACE: &str = "default";
 
 pub(crate) fn contains_ascii_ci(haystack: &str, needle_lower: &str) -> bool {
     if needle_lower.is_empty() {
@@ -58,6 +60,9 @@ pub struct App {
     pub secret_store: Option<Store<Secret>>,
     pub current_context: String,
     pub pending_context: Option<String>,
+    pub pending_teleport_login: Option<crate::k8s::teleport::Login>,
+    pub teleport: crate::k8s::teleport::State,
+    pub namespace_prompt_pending: bool,
 
     pub event_tx: UnboundedSender<KubeResourceEvent>,
 
@@ -151,8 +156,13 @@ impl App {
         Self,
         tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
     )> {
-        let namespace =
-            crate::k8s::config::get_context_namespace().unwrap_or_else(|_| "default".to_string());
+        let app_state = AppState::load();
+        let context = crate::k8s::config::get_current_context().unwrap_or_default();
+        let namespace = app_state
+            .last_namespace(&context)
+            .map(str::to_string)
+            .or_else(|| crate::k8s::config::get_context_namespace().ok().flatten())
+            .unwrap_or_default();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         Ok((
@@ -177,6 +187,9 @@ impl App {
                 log_scroll_offset: None,
                 current_context: "default".into(),
                 pending_context: None,
+                pending_teleport_login: None,
+                teleport: Default::default(),
+                namespace_prompt_pending: false,
                 available_contexts: Vec::new(),
                 available_namespaces: Vec::new(),
                 filtered_namespaces: Vec::new(),
@@ -230,7 +243,7 @@ impl App {
                 port_forward_list_state: ListState::default(),
                 port_forward_next_id: 0,
                 port_forward_stopped_ids: HashSet::new(),
-                app_state: AppState::load(),
+                app_state,
             },
             rx,
         ))
@@ -646,6 +659,96 @@ impl App {
         self.log_search_pending = false;
     }
 
+    pub fn context_entry_count(&self) -> usize {
+        self.available_contexts.len()
+            + self.teleport.clusters().len()
+            + usize::from(self.teleport.needs_login())
+    }
+
+    pub fn context_entry(&self, index: usize) -> Option<ContextEntry<'_>> {
+        if let Some(ctx) = self.available_contexts.get(index) {
+            return Some(ContextEntry::Kubeconfig(ctx));
+        }
+        let clusters = self.teleport.clusters();
+        let index = index.saturating_sub(self.available_contexts.len());
+        if let Some(cluster) = clusters.get(index) {
+            return Some(ContextEntry::Teleport(cluster));
+        }
+        if self.teleport.needs_login() && index == clusters.len() {
+            return Some(ContextEntry::TeleportLogin);
+        }
+        None
+    }
+
+    pub fn load_teleport_clusters(&self) {
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(KubeResourceEvent::TeleportState(
+                crate::k8s::teleport::probe().await,
+            ));
+        });
+    }
+
+    pub fn apply_namespaces(
+        &mut self,
+        context: &str,
+        namespaces: &[String],
+        origin: &NamespaceOrigin,
+    ) -> bool {
+        if context != self.current_context {
+            tracing::debug!("dropping stale namespace list for '{context}'");
+            return false;
+        }
+        self.available_namespaces = match origin.supersedes() {
+            Some(probed) => self.app_state.replace_namespaces(
+                context,
+                namespaces,
+                probed,
+                &self.current_namespace,
+            ),
+            None => self.app_state.merge_namespaces(context, namespaces),
+        };
+
+        if !self.has_namespace() {
+            self.resolve_namespace(origin.is_verified());
+        }
+        true
+    }
+
+    pub fn has_namespace(&self) -> bool {
+        !self.current_namespace.is_empty()
+    }
+
+    fn resolve_namespace(&mut self, verified: bool) {
+        let choice = match self.available_namespaces.as_slice() {
+            _ if !verified => None,
+            [] => None,
+            [only] => Some(only.clone()),
+            many => many.iter().find(|ns| *ns == DEFAULT_NAMESPACE).cloned(),
+        };
+        match choice {
+            Some(ns) => self.current_namespace = ns,
+            None => self.prompt_for_namespace(),
+        }
+    }
+
+    pub fn prompt_for_namespace(&mut self) {
+        if self.available_namespaces.is_empty() {
+            return;
+        }
+        if self.mode != AppMode::List {
+            self.namespace_prompt_pending = true;
+            return;
+        }
+        self.namespace_prompt_pending = false;
+        self.namespace_input.clear();
+        self.namespace_typing = false;
+        self.filtered_namespaces
+            .clone_from(&self.available_namespaces);
+        self.popup_state.select(Some(0));
+        self.mode = AppMode::NamespaceSelect;
+    }
+
     pub fn load_namespaces(&self) {
         let client = self.client.clone();
         let current_ns = self.current_namespace.clone();
@@ -655,27 +758,38 @@ impl App {
             use k8s_openapi::api::core::v1::Namespace;
             use kube::Api;
             use kube::api::ListParams;
+            let probe_client = client.clone();
             let ns_api: Api<Namespace> = Api::all(client);
-            if let Ok(ns_list) = ns_api.list(&ListParams::default()).await {
-                let namespaces: Vec<String> = ns_list
-                    .iter()
-                    .map(|n| n.metadata.name.clone().unwrap_or_default())
-                    .collect();
-                let _ = tx.send(KubeResourceEvent::NamespacesLoaded(namespaces));
-                return;
-            }
+            let list_denied = match ns_api.list(&ListParams::default()).await {
+                Ok(ns_list) => {
+                    let namespaces: Vec<String> = ns_list
+                        .iter()
+                        .map(|n| n.metadata.name.clone().unwrap_or_default())
+                        .collect();
+                    let _ = tx.send(KubeResourceEvent::NamespacesLoaded {
+                        context: ctx,
+                        namespaces,
+                        origin: NamespaceOrigin::Listed,
+                    });
+                    return;
+                }
+                Err(e) => {
+                    matches!(&e, kube::Error::Api(resp) if crate::k8s::access::is_access_denied(resp))
+                }
+            };
 
-            if let Ok(output) = tokio::process::Command::new("kubectl")
-                .args([
-                    "get",
-                    "namespaces",
-                    "--context",
-                    &ctx,
-                    "-o",
-                    "jsonpath={.items[*].metadata.name}",
-                ])
-                .output()
-                .await
+            if !list_denied
+                && let Ok(output) = tokio::process::Command::new("kubectl")
+                    .args([
+                        "get",
+                        "namespaces",
+                        "--context",
+                        &ctx,
+                        "-o",
+                        "jsonpath={.items[*].metadata.name}",
+                    ])
+                    .output()
+                    .await
                 && output.status.success()
             {
                 let text = String::from_utf8_lossy(&output.stdout);
@@ -685,12 +799,34 @@ impl App {
                     .filter(|s| !s.is_empty())
                     .collect();
                 if !namespaces.is_empty() {
-                    let _ = tx.send(KubeResourceEvent::NamespacesLoaded(namespaces));
+                    let _ = tx.send(KubeResourceEvent::NamespacesLoaded {
+                        context: ctx,
+                        namespaces,
+                        origin: NamespaceOrigin::Listed,
+                    });
                     return;
                 }
             }
 
-            let _ = tx.send(KubeResourceEvent::NamespacesLoaded(vec![current_ns]));
+            let granted = crate::k8s::teleport::grantable_namespaces(&ctx).await;
+            if !granted.is_empty() {
+                let (namespaces, origin) =
+                    crate::k8s::access::filter_relevant(&probe_client, granted)
+                        .await
+                        .into_parts();
+                let _ = tx.send(KubeResourceEvent::NamespacesLoaded {
+                    context: ctx,
+                    namespaces,
+                    origin,
+                });
+                return;
+            }
+
+            let _ = tx.send(KubeResourceEvent::NamespacesLoaded {
+                context: ctx,
+                namespaces: Vec::from_iter(Some(current_ns).filter(|ns| !ns.is_empty())),
+                origin: NamespaceOrigin::Unverified,
+            });
         });
     }
 
@@ -1185,6 +1321,9 @@ impl App {
             log_scroll_offset: None,
             current_context: "test-context".into(),
             pending_context: None,
+            pending_teleport_login: None,
+            teleport: Default::default(),
+            namespace_prompt_pending: false,
             available_contexts: vec!["ctx1".into(), "ctx2".into()],
             available_namespaces: vec!["default".into(), "kube-system".into()],
             filtered_namespaces: vec!["default".into(), "kube-system".into()],
@@ -1238,7 +1377,10 @@ impl App {
             port_forward_list_state: ListState::default(),
             port_forward_next_id: 0,
             port_forward_stopped_ids: HashSet::new(),
-            app_state: AppState::default(),
+            app_state: AppState {
+                no_persist: true,
+                ..Default::default()
+            },
         }
     }
 
@@ -1300,6 +1442,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::k8s::teleport::State as TeleportState;
     use crate::models::KubeResource;
     use k8s_openapi::ByteString;
     use k8s_openapi::api::core::v1::{Pod, Secret};
@@ -1593,7 +1736,6 @@ mod tests {
         app.log_buffer.push_back("line1".into());
         app.log_loading_history = true;
 
-        // Response has fewer lines than requested = pod has no more history
         app.merge_log_history(1, vec!["line1".into()]);
 
         assert!(app.log_history_exhausted);
@@ -1604,13 +1746,11 @@ mod tests {
         let mut app = App::new_test();
         app.log_generation = 1;
         app.log_tail_lines = 200;
-        // Fill buffer near capacity
         for i in 0..MAX_LOG_LINES - 2 {
             app.log_buffer.push_back(format!("existing{i}"));
         }
         app.log_loading_history = true;
 
-        // History offers 10 new lines, but only 2 can fit
         let mut history: Vec<String> = (0..10).map(|i| format!("new{i}")).collect();
         history.push("existing0".into());
         app.merge_log_history(1, history);
@@ -2444,5 +2584,279 @@ mod tests {
     async fn build_log_selection_text_none_without_anchor() {
         let app = App::new_test();
         assert!(app.build_log_selection_text().is_none());
+    }
+
+    #[tokio::test]
+    async fn context_entries_without_teleport() {
+        let app = App::new_test();
+        assert_eq!(app.context_entry_count(), 2);
+        assert_eq!(app.context_entry(0), Some(ContextEntry::Kubeconfig("ctx1")));
+        assert_eq!(app.context_entry(1), Some(ContextEntry::Kubeconfig("ctx2")));
+        assert_eq!(app.context_entry(2), None);
+    }
+
+    #[tokio::test]
+    async fn context_entries_append_teleport_clusters() {
+        let mut app = App::new_test();
+        app.teleport = TeleportState::Available(vec!["k8s.a".into(), "k8s.b".into()]);
+        assert_eq!(app.context_entry_count(), 4);
+        assert_eq!(app.context_entry(1), Some(ContextEntry::Kubeconfig("ctx2")));
+        assert_eq!(app.context_entry(2), Some(ContextEntry::Teleport("k8s.a")));
+        assert_eq!(app.context_entry(3), Some(ContextEntry::Teleport("k8s.b")));
+        assert_eq!(app.context_entry(4), None);
+    }
+
+    #[tokio::test]
+    async fn context_entries_include_login_prompt_when_required() {
+        let mut app = App::new_test();
+        app.teleport = TeleportState::NeedsLogin;
+        assert_eq!(app.context_entry_count(), 3);
+        assert_eq!(app.context_entry(2), Some(ContextEntry::TeleportLogin));
+        assert_eq!(app.context_entry(3), None);
+    }
+
+    #[tokio::test]
+    async fn test_app_never_persists_state() {
+        let app = App::new_test();
+        assert!(
+            app.app_state.no_persist,
+            "App::new_test() must not write to the real ~/.config/kr/state.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn namespaces_for_current_context_are_merged() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        assert!(app.apply_namespaces("ctx-a", &["ns-1".to_string()], &NamespaceOrigin::Listed));
+        assert!(app.available_namespaces.contains(&"ns-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn stale_namespaces_from_other_context_are_dropped() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-b".into();
+        app.available_namespaces = vec!["kept".into()];
+        assert!(!app.apply_namespaces("ctx-a", &["leaked".to_string()], &NamespaceOrigin::Listed));
+        assert_eq!(app.available_namespaces, vec!["kept".to_string()]);
+        assert!(app.app_state.get_namespaces("ctx-a").is_empty());
+        assert!(app.app_state.get_namespaces("ctx-b").is_empty());
+    }
+
+    #[tokio::test]
+    async fn authoritative_namespaces_replace_stale_entries() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = "default".into();
+        app.app_state.add_namespace("ctx-a", "revoked-ns");
+        let probed = ["live-ns".to_string(), "revoked-ns".to_string()];
+        assert!(app.apply_namespaces(
+            "ctx-a",
+            &["live-ns".to_string()],
+            &NamespaceOrigin::Probed(probed.to_vec())
+        ));
+        assert_eq!(app.available_namespaces, vec!["default", "live-ns"]);
+    }
+
+    #[tokio::test]
+    async fn authoritative_replace_keeps_never_probed_namespaces() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = "default".into();
+        app.app_state.add_namespace("ctx-a", "manual-ns");
+        app.app_state.add_namespace("ctx-a", "revoked-ns");
+        let probed = ["live-ns".to_string(), "revoked-ns".to_string()];
+        assert!(app.apply_namespaces(
+            "ctx-a",
+            &["live-ns".to_string()],
+            &NamespaceOrigin::Probed(probed.to_vec())
+        ));
+        assert_eq!(
+            app.available_namespaces,
+            vec!["default", "live-ns", "manual-ns"]
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_replace_keeps_current_even_if_rejected() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = "rejected-ns".into();
+        let probed = ["live-ns".to_string(), "rejected-ns".to_string()];
+        assert!(app.apply_namespaces(
+            "ctx-a",
+            &["live-ns".to_string()],
+            &NamespaceOrigin::Probed(probed.to_vec())
+        ));
+        assert_eq!(app.available_namespaces, vec!["live-ns", "rejected-ns"]);
+    }
+
+    #[tokio::test]
+    async fn non_authoritative_namespaces_keep_existing() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.app_state.add_namespace("ctx-a", "old-ns");
+        assert!(app.apply_namespaces("ctx-a", &["new-ns".to_string()], &NamespaceOrigin::Listed));
+        assert_eq!(app.available_namespaces, vec!["new-ns", "old-ns"]);
+    }
+
+    #[tokio::test]
+    async fn single_namespace_is_selected_automatically() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.apply_namespaces("ctx-a", &["team-a".to_string()], &NamespaceOrigin::Listed);
+        assert_eq!(app.current_namespace, "team-a");
+        assert_eq!(app.mode, AppMode::List);
+        assert_eq!(app.app_state.last_namespace("ctx-a"), None);
+    }
+
+    #[tokio::test]
+    async fn default_is_selected_when_present_among_many() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.apply_namespaces(
+            "ctx-a",
+            &["default".to_string(), "kube-system".to_string()],
+            &NamespaceOrigin::Listed,
+        );
+        assert_eq!(app.current_namespace, "default");
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn several_namespaces_without_default_open_the_picker() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.apply_namespaces(
+            "ctx-a",
+            &["team-a".to_string(), "team-b".to_string()],
+            &NamespaceOrigin::Listed,
+        );
+        assert!(!app.has_namespace());
+        assert_eq!(app.mode, AppMode::NamespaceSelect);
+        assert_eq!(app.filtered_namespaces, vec!["team-a", "team-b"]);
+    }
+
+    #[tokio::test]
+    async fn unverified_list_never_auto_selects() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.apply_namespaces(
+            "ctx-a",
+            &["team-a".to_string()],
+            &NamespaceOrigin::Unverified,
+        );
+        assert!(!app.has_namespace());
+        assert_eq!(app.mode, AppMode::NamespaceSelect);
+    }
+
+    #[tokio::test]
+    async fn unverified_list_with_default_never_auto_selects() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.apply_namespaces(
+            "ctx-a",
+            &["default".to_string(), "team-a".to_string()],
+            &NamespaceOrigin::Unverified,
+        );
+        assert!(!app.has_namespace());
+        assert_eq!(app.mode, AppMode::NamespaceSelect);
+    }
+
+    #[tokio::test]
+    async fn probed_list_auto_selects() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        let probed = ["team-a".to_string()];
+        app.apply_namespaces(
+            "ctx-a",
+            &["team-a".to_string()],
+            &NamespaceOrigin::Probed(probed.to_vec()),
+        );
+        assert_eq!(app.current_namespace, "team-a");
+    }
+
+    #[tokio::test]
+    async fn skipped_prompt_is_rearmed() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.mode = AppMode::LogView;
+        app.apply_namespaces(
+            "ctx-a",
+            &["team-a".to_string(), "team-b".to_string()],
+            &NamespaceOrigin::Listed,
+        );
+        assert!(app.namespace_prompt_pending);
+        app.mode = AppMode::List;
+        app.prompt_for_namespace();
+        assert_eq!(app.mode, AppMode::NamespaceSelect);
+        assert!(!app.namespace_prompt_pending);
+    }
+
+    #[tokio::test]
+    async fn empty_namespace_list_leaves_namespace_unset() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.apply_namespaces("ctx-a", &[], &NamespaceOrigin::Listed);
+        assert!(!app.has_namespace());
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn existing_namespace_is_never_reresolved() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = "team-b".into();
+        app.apply_namespaces(
+            "ctx-a",
+            &["default".to_string(), "team-a".to_string()],
+            &NamespaceOrigin::Listed,
+        );
+        assert_eq!(app.current_namespace, "team-b");
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn picker_is_suppressed_outside_list_mode() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.mode = AppMode::LogView;
+        app.apply_namespaces(
+            "ctx-a",
+            &["team-a".to_string(), "team-b".to_string()],
+            &NamespaceOrigin::Listed,
+        );
+        assert_eq!(app.mode, AppMode::LogView);
+        assert!(!app.has_namespace());
+    }
+
+    #[tokio::test]
+    async fn unavailable_teleport_adds_no_entries() {
+        let mut app = App::new_test();
+        app.teleport = TeleportState::Unavailable;
+        assert_eq!(app.context_entry_count(), 2);
+        assert_eq!(app.context_entry(2), None);
+    }
+
+    #[tokio::test]
+    async fn context_entry_never_panics_out_of_range() {
+        let mut app = App::new_test();
+        app.teleport = TeleportState::Available(vec!["k8s.a".into()]);
+        for i in 0..10 {
+            let _ = app.context_entry(i);
+        }
+        app.available_contexts.clear();
+        for i in 0..10 {
+            let _ = app.context_entry(i);
+        }
     }
 }

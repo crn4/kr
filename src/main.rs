@@ -33,6 +33,14 @@ struct Args {
     command: Option<String>,
 }
 
+const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
+
+fn rotate_if_oversized(path: &std::path::Path) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
+    }
+}
+
 fn init_tracing(to_file: bool) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new("kr=info,kube=warn,hyper=warn,tower=warn,h2=warn")
@@ -43,10 +51,12 @@ fn init_tracing(to_file: bool) {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("kr");
         let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join("kr.log");
+        rotate_if_oversized(&log_path);
         if let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(log_dir.join("kr.log"))
+            .open(&log_path)
         {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)

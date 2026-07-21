@@ -39,6 +39,19 @@ fn draw_context_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
             };
             ListItem::new(Span::raw(label))
         })
+        .chain(app.teleport.clusters().iter().map(|cluster| {
+            ListItem::new(Line::from(vec![
+                Span::styled("⚡ ", Style::default().fg(COLOR_TELEPORT)),
+                Span::raw(cluster.as_str()),
+                Span::styled(" (teleport)", Style::default().fg(COLOR_TELEPORT)),
+            ]))
+        }))
+        .chain(app.teleport.needs_login().then(|| {
+            ListItem::new(Span::styled(
+                "⚡ Log in to Teleport (tsh login)",
+                Style::default().fg(COLOR_TELEPORT),
+            ))
+        }))
         .collect();
 
     let list = List::new(list_items)
@@ -166,7 +179,7 @@ fn draw_port_forward_list(f: &mut Frame, app: &mut App) {
         .collect();
 
     let max_line = entries.iter().map(|s| s.len()).max().unwrap_or(20);
-    let w = (max_line as u16 + 2 + 3).max(30); // +2 borders, +3 highlight ">> "
+    let w = (max_line as u16 + 2 + 3).max(30);
     let h = (entries.len() as u16 + 2).max(4);
     let area = centered_fixed_rect(w, h, f.area());
     f.render_widget(Clear, area);

@@ -107,8 +107,43 @@ pub enum KubeResourceEvent {
     ShellOutput(Vec<u8>),
     ShellExited,
     DescribeReady(Vec<String>),
-    NamespacesLoaded(Vec<String>),
-    PortForwardStopped { id: u64, error: Option<String> },
+    NamespacesLoaded {
+        context: String,
+        namespaces: Vec<String>,
+        origin: NamespaceOrigin,
+    },
+    TeleportState(crate::k8s::teleport::State),
+    PortForwardStopped {
+        id: u64,
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceOrigin {
+    Listed,
+    Probed(Vec<String>),
+    Unverified,
+}
+
+impl NamespaceOrigin {
+    pub fn is_verified(&self) -> bool {
+        !matches!(self, NamespaceOrigin::Unverified)
+    }
+
+    pub fn supersedes(&self) -> Option<&[String]> {
+        match self {
+            NamespaceOrigin::Probed(probed) => Some(probed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextEntry<'a> {
+    Kubeconfig(&'a str),
+    Teleport(&'a str),
+    TeleportLogin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

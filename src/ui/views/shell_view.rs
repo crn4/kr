@@ -20,7 +20,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let (rows, cols) = screen.size();
     let cursor = screen.cursor_position();
 
-    let inner_height = area.height.saturating_sub(2); // borders
+    let inner_height = area.height.saturating_sub(2);
     let inner_width = area.width.saturating_sub(2);
 
     let mut lines: Vec<Line> = Vec::with_capacity(rows as usize);

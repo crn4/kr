@@ -1,5 +1,8 @@
 use crate::app::{App, LOG_CHROME_LINES};
-use crate::models::{AppMode, KubeResource, KubeResourceEvent, PendingAction, ResourceType};
+use crate::k8s::teleport::Login as TeleportLogin;
+use crate::models::{
+    AppMode, ContextEntry, KubeResource, KubeResourceEvent, PendingAction, ResourceType,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 
@@ -25,16 +28,26 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_popup_input(app: &mut App, key: KeyEvent) {
-    let len = app.available_contexts.len();
+    let len = app.context_entry_count();
     match key.code {
         KeyCode::Esc => {
             app.mode = AppMode::List;
         }
         KeyCode::Enter => {
-            if let Some(i) = app.popup_state.selected()
-                && let Some(ctx) = app.available_contexts.get(i)
-            {
-                app.pending_context = Some(ctx.clone());
+            if let Some(i) = app.popup_state.selected() {
+                match app.context_entry(i) {
+                    Some(ContextEntry::Kubeconfig(ctx)) => {
+                        app.pending_context = Some(ctx.to_string());
+                    }
+                    Some(ContextEntry::Teleport(cluster)) => {
+                        app.pending_teleport_login =
+                            Some(TeleportLogin::KubeCluster(cluster.to_string()));
+                    }
+                    Some(ContextEntry::TeleportLogin) => {
+                        app.pending_teleport_login = Some(TeleportLogin::Profile);
+                    }
+                    None => {}
+                }
             }
             app.mode = AppMode::List;
         }
@@ -73,6 +86,7 @@ fn select_namespace(app: &mut App, ns: String) {
         app.current_namespace = ns.clone();
         let ctx = app.current_context.clone();
         app.app_state.add_namespace(&ctx, &ns);
+        app.app_state.set_last_namespace(&ctx, &ns);
         if !app.available_namespaces.contains(&ns) {
             app.available_namespaces.push(ns);
             app.available_namespaces.sort();
@@ -534,6 +548,7 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
                 .position(|ctx| *ctx == app.current_context);
             app.popup_state.select(current_idx.or(Some(0)));
             app.mode = AppMode::ContextSelect;
+            app.load_teleport_clusters();
         }
         KeyCode::Char('n') => {
             app.namespace_input.clear();
@@ -1241,6 +1256,7 @@ fn prev_row(app: &mut App) {
 mod tests {
     use super::*;
     use crate::app::App;
+    use crate::k8s::teleport::State as TeleportState;
     use crate::models::{AppMode, KubeResource, PendingAction, ResourceType};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use k8s_openapi::api::{apps::v1::Deployment, core::v1::Pod};
@@ -1377,6 +1393,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_popup_enter_selects_kubeconfig_context() {
+        let mut app = App::new_test();
+        app.teleport = TeleportState::Available(vec!["k8s.a".into()]);
+        app.mode = AppMode::ContextSelect;
+        app.popup_state.select(Some(1));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.pending_context.as_deref(), Some("ctx2"));
+        assert!(app.pending_teleport_login.is_none());
+    }
+
+    #[tokio::test]
+    async fn context_popup_enter_selects_teleport_cluster() {
+        let mut app = App::new_test();
+        app.teleport = TeleportState::Available(vec!["k8s.a".into(), "k8s.b".into()]);
+        app.mode = AppMode::ContextSelect;
+        app.popup_state.select(Some(3));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(
+            app.pending_teleport_login,
+            Some(TeleportLogin::KubeCluster("k8s.b".into()))
+        );
+        assert!(app.pending_context.is_none());
+        assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn context_popup_navigation_spans_teleport_entries() {
+        let mut app = App::new_test();
+        app.teleport = TeleportState::Available(vec!["k8s.a".into()]);
+        app.mode = AppMode::ContextSelect;
+        app.popup_state.select(Some(0));
+        for _ in 0..5 {
+            handle_input(&mut app, key(KeyCode::Char('j')));
+        }
+        assert_eq!(app.popup_state.selected(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn context_popup_enter_triggers_teleport_login() {
+        let mut app = App::new_test();
+        app.teleport = TeleportState::NeedsLogin;
+        app.mode = AppMode::ContextSelect;
+        app.popup_state.select(Some(2));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.pending_teleport_login, Some(TeleportLogin::Profile));
+        assert!(app.pending_context.is_none());
+    }
+
+    #[tokio::test]
+    async fn context_popup_enter_out_of_range_is_noop() {
+        let mut app = App::new_test();
+        app.mode = AppMode::ContextSelect;
+        app.popup_state.select(Some(99));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert!(app.pending_context.is_none());
+        assert!(app.pending_teleport_login.is_none());
+    }
+
+    #[tokio::test]
     async fn n_opens_namespace_select() {
         let mut app = App::new_test();
         handle_input(&mut app, key(KeyCode::Char('n')));
@@ -1451,6 +1526,20 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Enter));
         assert_eq!(app.current_namespace, "staging");
         assert_eq!(app.mode, AppMode::List);
+    }
+
+    #[tokio::test]
+    async fn selecting_namespace_remembers_it_and_clears_provisional() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.mode = AppMode::NamespaceSelect;
+        app.available_namespaces = vec!["team-a".into()];
+        app.filtered_namespaces = vec!["team-a".into()];
+        app.popup_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.current_namespace, "team-a");
+        assert_eq!(app.app_state.last_namespace("ctx-a"), Some("team-a"));
     }
 
     #[tokio::test]

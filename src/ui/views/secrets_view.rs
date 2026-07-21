@@ -62,8 +62,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     .highlight_spacing(HighlightSpacing::Always);
 
     if app.filtered_items.is_empty() && !app.is_active_tab_loading() {
-        let msg = if app.last_error.is_some() {
-            "" // error shown in footer
+        let msg = if !app.has_namespace() {
+            "No namespace selected — press n to choose one"
+        } else if app.last_error.is_some() {
+            ""
         } else if app.filter_query.is_empty() {
             "No secrets in this namespace"
         } else {

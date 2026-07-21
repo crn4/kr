@@ -14,13 +14,14 @@ use crate::ui::draw;
 use kube::runtime::watcher;
 
 fn is_forbidden(err: &watcher::Error) -> bool {
+    use crate::k8s::access::is_access_denied;
     match err {
         watcher::Error::InitialListFailed(e)
         | watcher::Error::WatchStartFailed(e)
         | watcher::Error::WatchFailed(e) => {
-            matches!(e, kube::Error::Api(resp) if resp.is_forbidden())
+            matches!(e, kube::Error::Api(resp) if is_access_denied(resp))
         }
-        watcher::Error::WatchError(resp) => resp.is_forbidden(),
+        watcher::Error::WatchError(resp) => is_access_denied(resp),
         _ => false,
     }
 }
@@ -91,7 +92,7 @@ fn ensure_watcher(
     watcher_active: &mut [bool; 3],
 ) {
     let idx = tab.index();
-    if watcher_active[idx] || app.tab_forbidden[idx] {
+    if watcher_active[idx] || app.tab_forbidden[idx] || !app.has_namespace() {
         return;
     }
     let stream = create_watcher_for_tab(app, tab);
@@ -187,10 +188,23 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
             app.describe_hscroll = 0;
             app.mode = AppMode::DescribeView;
         }
-        KubeResourceEvent::NamespacesLoaded(namespaces) => {
-            let ctx = app.current_context.clone();
-            app.available_namespaces = app.app_state.merge_namespaces(&ctx, &namespaces);
-            app.app_state.save();
+        KubeResourceEvent::NamespacesLoaded {
+            context,
+            namespaces,
+            origin,
+        } => {
+            if app.apply_namespaces(&context, &namespaces, &origin) {
+                app.app_state.save();
+            }
+        }
+        KubeResourceEvent::TeleportState(state) => {
+            app.teleport = state;
+            if app.mode == AppMode::ContextSelect
+                && let Some(i) = app.popup_state.selected()
+            {
+                app.popup_state
+                    .select(Some(i.min(app.context_entry_count().saturating_sub(1))));
+            }
         }
         KubeResourceEvent::PortForwardStopped { id, error } => {
             let user_stopped = app.port_forward_stopped_ids.remove(&id);
@@ -228,13 +242,14 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
     }
 
     app.available_namespaces = app.app_state.get_namespaces(&app.current_context);
-    if !app.available_namespaces.contains(&app.current_namespace) {
+    if app.has_namespace() && !app.available_namespaces.contains(&app.current_namespace) {
         app.available_namespaces.push(app.current_namespace.clone());
         app.available_namespaces.sort();
     }
 
     app.refresh_items();
     app.load_namespaces();
+    app.load_teleport_clusters();
 
     let mut current_ctx = app.current_context.clone();
 
@@ -250,16 +265,42 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
             return Ok(());
         }
 
-        if let Some(new_ctx) = app.pending_context.take() {
+        if app.pending_context.is_some() || app.pending_teleport_login.is_some() {
             crossterm::terminal::disable_raw_mode()?;
             crossterm::execute!(
                 terminal.backend_mut(),
                 crossterm::terminal::LeaveAlternateScreen,
                 crossterm::cursor::Show
             )?;
-            eprintln!("Authenticating with context '{new_ctx}'...");
 
-            let result = crate::k8s::config::create_client_with_context(&new_ctx).await;
+            let mut login_error = None;
+            let teleport_attempted = app.pending_teleport_login.is_some();
+            if let Some(login) = app.pending_teleport_login.take() {
+                match &login {
+                    crate::k8s::teleport::Login::Profile => {
+                        eprintln!("Logging into Teleport...")
+                    }
+                    crate::k8s::teleport::Login::KubeCluster(cluster) => {
+                        eprintln!("Logging into Teleport cluster '{cluster}'...")
+                    }
+                }
+                match tokio::task::spawn_blocking(move || crate::k8s::teleport::log_in(&login))
+                    .await
+                {
+                    Ok(Ok(ctx)) => app.pending_context = ctx,
+                    Ok(Err(e)) => login_error = Some(format!("Teleport login failed: {e}")),
+                    Err(e) => login_error = Some(format!("Teleport login failed: {e}")),
+                }
+            }
+
+            let switch = match app.pending_context.take() {
+                Some(new_ctx) => {
+                    eprintln!("Authenticating with context '{new_ctx}'...");
+                    let result = crate::k8s::config::create_client_with_context(&new_ctx).await;
+                    Some((new_ctx, result))
+                }
+                None => None,
+            };
 
             crossterm::execute!(
                 terminal.backend_mut(),
@@ -269,23 +310,48 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
             crossterm::terminal::enable_raw_mode()?;
             terminal.clear()?;
 
-            match result {
-                Ok(client) => {
-                    app.stop_all_port_forwards();
-                    app.client = client;
-                    app.current_namespace = crate::k8s::config::get_namespace_for_context_async(new_ctx.clone()).await;
-                    app.current_context = new_ctx.clone();
+            if let Some(err) = login_error {
+                app.set_error(err);
+            }
 
-                    app.available_namespaces = app.app_state.get_namespaces(&new_ctx);
-                    if !app.available_namespaces.contains(&app.current_namespace) {
-                        app.available_namespaces.push(app.current_namespace.clone());
-                        app.available_namespaces.sort();
+            let mut switched = false;
+            if let Some((new_ctx, result)) = switch {
+                match result {
+                    Ok(client) => {
+                        app.stop_all_port_forwards();
+                        app.client = client;
+                        let remembered = app
+                            .app_state
+                            .last_namespace(&new_ctx)
+                            .map(str::to_string)
+                            .or(crate::k8s::config::configured_namespace_for_context_async(
+                                new_ctx.clone(),
+                            )
+                            .await);
+                        app.current_namespace = remembered.unwrap_or_default();
+                        app.current_context = new_ctx.clone();
+
+                        app.available_namespaces = app.app_state.get_namespaces(&new_ctx);
+                        if app.has_namespace()
+                            && !app.available_namespaces.contains(&app.current_namespace)
+                        {
+                            app.available_namespaces.push(app.current_namespace.clone());
+                            app.available_namespaces.sort();
+                        }
+                        app.load_namespaces();
+                        switched = true;
                     }
-                    app.load_namespaces();
+                    Err(e) => {
+                        app.set_error(format!("Context switch failed: {e}"));
+                    }
                 }
-                Err(e) => {
-                    app.set_error(format!("Context switch failed: {e}"));
+            }
+
+            if teleport_attempted || switched {
+                if let Some(ctxs) = crate::k8s::config::list_contexts_async().await {
+                    app.available_contexts = ctxs;
                 }
+                app.load_teleport_clusters();
             }
             app.dirty = true;
         }
@@ -345,6 +411,9 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
             Some(Ok(event)) = reader.next() => {
                if let Event::Key(key) = event {
                    handle_input(&mut app, key);
+                   if app.namespace_prompt_pending && !app.has_namespace() {
+                       app.prompt_for_namespace();
+                   }
                    app.dirty = true;
                }
             }
