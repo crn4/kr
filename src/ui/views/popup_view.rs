@@ -116,16 +116,6 @@ fn draw_namespace_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rec
     }
 }
 
-fn status_color(phase: &str) -> ratatui::style::Color {
-    match phase {
-        "Running" => COLOR_STATUS_RUNNING,
-        "Pending" => COLOR_STATUS_PENDING,
-        "Succeeded" => COLOR_STATUS_SUCCEEDED,
-        "Terminating" => COLOR_STATUS_TERMINATING,
-        _ => COLOR_STATUS_ERROR,
-    }
-}
-
 fn draw_status_filter_popup(f: &mut Frame, app: &mut App) {
     let h = (app.status_filter_items.len() as u16 + 2).max(4);
     let area = centered_fixed_rect(40, h, f.area());
@@ -146,7 +136,10 @@ fn draw_status_filter_popup(f: &mut Frame, app: &mut App) {
                     format!("{marker} "),
                     Style::default().fg(COLOR_STATUS_RUNNING),
                 ),
-                Span::styled(phase.as_str(), Style::default().fg(status_color(phase))),
+                Span::styled(
+                    phase.as_str(),
+                    Style::default().fg(crate::ui::theme::status_color(phase)),
+                ),
                 Span::styled(format!(" ({count})"), STYLE_NORMAL),
             ]);
             ListItem::new(line)

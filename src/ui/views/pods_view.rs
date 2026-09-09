@@ -43,23 +43,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
             let name = p.metadata.name.as_deref().unwrap_or_default();
             let status_obj = p.status.as_ref();
-            let phase = status_obj
-                .and_then(|s| s.phase.as_deref())
-                .unwrap_or_default();
+            let status = App::pod_display_status(p);
+            let status_style = Style::default().fg(crate::ui::theme::status_color(&status));
 
             let restarts = App::pod_restarts(p);
             let ready_count = App::pod_ready_count(p);
             let total_containers = App::pod_total_containers(p);
 
             let age = crate::utils::get_resource_age(p.metadata.creation_timestamp.as_ref());
-
-            let status_style = match phase {
-                "Running" => Style::default().fg(COLOR_STATUS_RUNNING),
-                "Pending" => Style::default().fg(COLOR_STATUS_PENDING),
-                "Succeeded" => Style::default().fg(COLOR_STATUS_SUCCEEDED),
-                "Terminating" => Style::default().fg(COLOR_STATUS_TERMINATING),
-                _ => Style::default().fg(COLOR_STATUS_ERROR),
-            };
 
             let marker_style = if selected {
                 Style::default().fg(COLOR_STATUS_RUNNING)
@@ -71,7 +62,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(marker).style(marker_style),
                 Cell::from(name),
                 Cell::from(format!("{}/{}", ready_count, total_containers)),
-                Cell::from(phase).style(status_style),
+                Cell::from(status).style(status_style),
                 Cell::from(restarts.to_string()),
                 Cell::from(age),
             ];

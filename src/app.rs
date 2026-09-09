@@ -342,9 +342,9 @@ impl App {
                 ra.cmp(&rb)
             }
             2 => {
-                let sa = Self::pod_phase(a);
-                let sb = Self::pod_phase(b);
-                sa.cmp(sb)
+                let sa = Self::pod_display_status(a);
+                let sb = Self::pod_display_status(b);
+                sa.cmp(&sb)
             }
             3 => {
                 let ra = Self::pod_restarts(a);
@@ -1433,6 +1433,91 @@ impl App {
         (app, rx)
     }
 
+    pub fn pod_display_status(p: &Pod) -> std::borrow::Cow<'_, str> {
+        use std::borrow::Cow;
+
+        let phase = Self::pod_phase(p);
+        if p.metadata.deletion_timestamp.is_some() && !matches!(phase, "Succeeded" | "Failed") {
+            return Cow::Borrowed("Terminating");
+        }
+
+        let status = p.status.as_ref();
+
+        if let Some(init) = status.and_then(|s| s.init_container_statuses.as_deref()) {
+            let total = p
+                .spec
+                .as_ref()
+                .and_then(|s| s.init_containers.as_ref())
+                .map_or(0, Vec::len);
+            for (i, cs) in init.iter().enumerate() {
+                let state = cs.state.as_ref();
+                if cs.started == Some(true)
+                    || state
+                        .and_then(|s| s.terminated.as_ref())
+                        .is_some_and(|t| t.exit_code == 0)
+                {
+                    continue;
+                }
+                return match Self::container_state_reason(state) {
+                    Some(reason) if reason != "PodInitializing" => {
+                        Cow::Owned(format!("Init:{reason}"))
+                    }
+                    _ => Cow::Owned(format!("Init:{i}/{total}")),
+                };
+            }
+        }
+
+        let containers = status
+            .and_then(|s| s.container_statuses.as_deref())
+            .unwrap_or_default();
+
+        let reason = containers
+            .iter()
+            .filter(|cs| !cs.ready)
+            .find_map(|cs| Self::container_state_reason(cs.state.as_ref()));
+
+        match reason {
+            Some("Completed") if containers.iter().any(Self::is_running_and_ready) => {
+                if Self::pod_is_ready(p) {
+                    Cow::Borrowed("Running")
+                } else {
+                    Cow::Borrowed("NotReady")
+                }
+            }
+            Some(reason) => Cow::Borrowed(reason),
+            None => Cow::Borrowed(status.and_then(|s| s.reason.as_deref()).unwrap_or(phase)),
+        }
+    }
+
+    fn container_state_reason(
+        state: Option<&k8s_openapi::api::core::v1::ContainerState>,
+    ) -> Option<&str> {
+        let state = state?;
+        state
+            .waiting
+            .as_ref()
+            .and_then(|w| w.reason.as_deref())
+            .or_else(|| state.terminated.as_ref().and_then(|t| t.reason.as_deref()))
+    }
+
+    fn is_running_and_ready(cs: &k8s_openapi::api::core::v1::ContainerStatus) -> bool {
+        cs.ready
+            && cs
+                .state
+                .as_ref()
+                .is_some_and(|state| state.running.is_some())
+    }
+
+    fn pod_is_ready(p: &Pod) -> bool {
+        p.status
+            .as_ref()
+            .and_then(|s| s.conditions.as_deref())
+            .into_iter()
+            .flatten()
+            .find(|c| c.type_ == "Ready")
+            .is_some_and(|c| c.status == "True")
+    }
+
     pub fn pod_phase(p: &Pod) -> &str {
         p.status
             .as_ref()
@@ -1445,7 +1530,9 @@ impl App {
             std::collections::BTreeMap::new();
         for item in &self.items {
             if let KubeResource::Pod(p) = item {
-                *counts.entry(Self::pod_phase(p).to_owned()).or_default() += 1;
+                *counts
+                    .entry(Self::pod_display_status(p).into_owned())
+                    .or_default() += 1;
             }
         }
         self.status_filter_items = counts.into_iter().collect();
@@ -1473,7 +1560,7 @@ impl App {
                 .filter(|item| {
                     if has_status
                         && let KubeResource::Pod(p) = item
-                        && !self.status_filter.contains(Self::pod_phase(p))
+                        && !self.status_filter.contains(&*Self::pod_display_status(p))
                     {
                         return false;
                     }
@@ -1494,7 +1581,7 @@ mod tests {
     use crate::k8s::teleport::State as TeleportState;
     use crate::models::KubeResource;
     use k8s_openapi::ByteString;
-    use k8s_openapi::api::core::v1::{Pod, Secret};
+    use k8s_openapi::api::core::v1::{ContainerStatus, Pod, Secret};
     use std::collections::BTreeMap;
 
     fn make_pod(name: &str) -> KubeResource {
@@ -2217,6 +2304,252 @@ mod tests {
             ..Default::default()
         });
         KubeResource::Pod(Arc::new(pod))
+    }
+
+    fn pod_with_status(phase: &str, statuses: Vec<ContainerStatus>) -> Pod {
+        Pod {
+            status: Some(k8s_openapi::api::core::v1::PodStatus {
+                phase: Some(phase.to_string()),
+                container_statuses: Some(statuses),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn waiting_container(reason: &str) -> ContainerStatus {
+        ContainerStatus {
+            ready: false,
+            state: Some(k8s_openapi::api::core::v1::ContainerState {
+                waiting: Some(k8s_openapi::api::core::v1::ContainerStateWaiting {
+                    reason: Some(reason.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn pod_with_waiting_reason(reason: &str) -> Pod {
+        pod_with_status("Running", vec![waiting_container(reason)])
+    }
+
+    #[test]
+    fn crashlooping_pod_reports_the_waiting_reason_not_running() {
+        let pod = pod_with_waiting_reason("CrashLoopBackOff");
+        assert_eq!(App::pod_phase(&pod), "Running");
+        assert_eq!(App::pod_display_status(&pod), "CrashLoopBackOff");
+    }
+
+    fn init_pod(total: usize, init: Vec<ContainerStatus>, main: Vec<ContainerStatus>) -> Pod {
+        Pod {
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                init_containers: Some(vec![Default::default(); total]),
+                ..Default::default()
+            }),
+            status: Some(k8s_openapi::api::core::v1::PodStatus {
+                phase: Some("Pending".to_string()),
+                init_container_statuses: Some(init),
+                container_statuses: Some(main),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn failing_init_container_is_not_masked_as_pod_initializing() {
+        let pod = init_pod(
+            2,
+            vec![waiting_container("CrashLoopBackOff")],
+            vec![waiting_container("PodInitializing")],
+        );
+        assert_eq!(App::pod_display_status(&pod), "Init:CrashLoopBackOff");
+        assert_eq!(
+            crate::ui::theme::status_color("Init:CrashLoopBackOff"),
+            crate::ui::theme::COLOR_STATUS_ERROR
+        );
+    }
+
+    #[test]
+    fn init_in_progress_reports_position() {
+        let pod = init_pod(
+            3,
+            vec![
+                ContainerStatus {
+                    ready: true,
+                    state: Some(k8s_openapi::api::core::v1::ContainerState {
+                        terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                            exit_code: 0,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                waiting_container("PodInitializing"),
+            ],
+            vec![waiting_container("PodInitializing")],
+        );
+        assert_eq!(App::pod_display_status(&pod), "Init:1/3");
+        assert_eq!(
+            crate::ui::theme::status_color("Init:1/3"),
+            crate::ui::theme::COLOR_STATUS_PENDING
+        );
+    }
+
+    #[test]
+    fn completed_helper_beside_a_running_app_still_reports_running() {
+        let mut pod = pod_with_status(
+            "Running",
+            vec![
+                ContainerStatus {
+                    ready: true,
+                    state: Some(k8s_openapi::api::core::v1::ContainerState {
+                        running: Some(Default::default()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                ContainerStatus {
+                    ready: false,
+                    state: Some(k8s_openapi::api::core::v1::ContainerState {
+                        terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                            reason: Some("Completed".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert_eq!(App::pod_display_status(&pod), "NotReady");
+
+        if let Some(status) = pod.status.as_mut() {
+            status.conditions = Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                type_: "Ready".to_string(),
+                status: "True".to_string(),
+                ..Default::default()
+            }]);
+        }
+        assert_eq!(App::pod_display_status(&pod), "Running");
+    }
+
+    #[test]
+    fn evicted_pod_reports_the_status_reason() {
+        let pod = Pod {
+            status: Some(k8s_openapi::api::core::v1::PodStatus {
+                phase: Some("Failed".to_string()),
+                reason: Some("Evicted".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(App::pod_display_status(&pod), "Evicted");
+    }
+
+    #[test]
+    fn deleted_finished_pod_keeps_its_terminal_status() {
+        let mut pod = pod_with_status(
+            "Succeeded",
+            vec![ContainerStatus {
+                ready: false,
+                state: Some(k8s_openapi::api::core::v1::ContainerState {
+                    terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                        reason: Some("Completed".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        );
+        pod.metadata.deletion_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::UNIX_EPOCH),
+        );
+        assert_eq!(App::pod_display_status(&pod), "Completed");
+    }
+
+    #[test]
+    fn image_pull_failure_is_visible() {
+        let pod = pod_with_waiting_reason("ImagePullBackOff");
+        assert_eq!(App::pod_display_status(&pod), "ImagePullBackOff");
+    }
+
+    #[test]
+    fn deleting_pod_reports_terminating() {
+        let mut pod = pod_with_waiting_reason("CrashLoopBackOff");
+        pod.metadata.deletion_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::UNIX_EPOCH),
+        );
+        assert_eq!(App::pod_display_status(&pod), "Terminating");
+    }
+
+    #[test]
+    fn ready_containers_keep_the_phase() {
+        let pod = pod_with_status(
+            "Running",
+            vec![ContainerStatus {
+                ready: true,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(App::pod_display_status(&pod), "Running");
+    }
+
+    #[test]
+    fn pod_without_container_statuses_falls_back_to_phase() {
+        let pod = pod_with_status("Pending", Vec::new());
+        assert_eq!(App::pod_display_status(&pod), "Pending");
+        assert_eq!(App::pod_display_status(&Pod::default()), "Unknown");
+    }
+
+    #[test]
+    fn finished_pod_reports_completed_like_kubectl() {
+        let pod = pod_with_status(
+            "Succeeded",
+            vec![ContainerStatus {
+                ready: false,
+                state: Some(k8s_openapi::api::core::v1::ContainerState {
+                    terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                        reason: Some("Completed".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(App::pod_display_status(&pod), "Completed");
+    }
+
+    #[tokio::test]
+    async fn status_filter_matches_the_displayed_status() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        let mut crashing = pod_with_waiting_reason("CrashLoopBackOff");
+        crashing.metadata.name = Some("crashing".to_string());
+        let mut healthy = pod_with_status("Running", Vec::new());
+        healthy.metadata.name = Some("healthy".to_string());
+        app.items = vec![
+            KubeResource::Pod(Arc::new(crashing)),
+            KubeResource::Pod(Arc::new(healthy)),
+        ];
+
+        app.build_status_filter_items();
+        let statuses: Vec<&str> = app
+            .status_filter_items
+            .iter()
+            .map(|(s, _)| s.as_str())
+            .collect();
+        assert!(statuses.contains(&"CrashLoopBackOff"), "{statuses:?}");
+
+        app.status_filter.insert("CrashLoopBackOff".to_string());
+        app.update_filter();
+        assert_eq!(app.filtered_items.len(), 1);
+        assert_eq!(app.filtered_items[0].name(), "crashing");
     }
 
     #[tokio::test]
