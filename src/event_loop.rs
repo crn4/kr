@@ -170,16 +170,20 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         KubeResourceEvent::Success(msg) => {
             app.set_success(msg);
         }
-        KubeResourceEvent::ShellOutput(data) => {
-            if let Some(session) = &mut app.shell_session {
+        KubeResourceEvent::ShellOutput(generation, data) => {
+            if generation == app.shell_generation
+                && let Some(session) = &mut app.shell_session
+            {
                 session.parser.process(&data);
             }
         }
-        KubeResourceEvent::ShellExited => {
-            app.shell_session = None;
-            if app.mode == AppMode::ShellView {
-                app.mode = AppMode::List;
-                app.set_success("Shell session ended".to_string());
+        KubeResourceEvent::ShellExited(generation) => {
+            if generation == app.shell_generation {
+                app.shell_session = None;
+                if app.mode == AppMode::ShellView {
+                    app.mode = AppMode::List;
+                    app.set_success("Shell session ended".to_string());
+                }
             }
         }
         KubeResourceEvent::DescribeReady(lines) => {
@@ -460,6 +464,30 @@ mod tests {
             code: 404,
             ..Default::default()
         })
+    }
+
+    #[tokio::test]
+    async fn stale_shell_exit_does_not_end_the_live_session() {
+        let mut app = App::new_test();
+        app.shell_generation = 7;
+        app.mode = AppMode::ShellView;
+
+        handle_channel_event(&mut app, KubeResourceEvent::ShellExited(6));
+
+        assert_eq!(app.mode, AppMode::ShellView);
+        assert!(app.last_success.is_none());
+    }
+
+    #[tokio::test]
+    async fn current_shell_exit_ends_the_session() {
+        let mut app = App::new_test();
+        app.shell_generation = 7;
+        app.mode = AppMode::ShellView;
+
+        handle_channel_event(&mut app, KubeResourceEvent::ShellExited(7));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.last_success.is_some());
     }
 
     #[test]

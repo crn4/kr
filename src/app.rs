@@ -17,10 +17,23 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::AbortHandle;
 
+type ShellChild = Arc<std::sync::Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>;
+
 pub struct ShellSession {
     pub writer: Box<dyn std::io::Write + Send>,
     pub parser: vt100::Parser,
+    child: ShellChild,
     _master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
+impl Drop for ShellSession {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.child.lock()
+            && let Some(child) = slot.as_mut()
+        {
+            let _ = child.clone_killer().kill();
+        }
+    }
 }
 
 pub struct ActivePortForward {
@@ -107,6 +120,7 @@ pub struct App {
 
     pub shell_session: Option<ShellSession>,
     pub shell_title: String,
+    pub shell_generation: u64,
 
     pub clipboard_clear_task: Option<AbortHandle>,
 
@@ -216,6 +230,7 @@ impl App {
                 describe_hscroll: 0,
                 shell_session: None,
                 shell_title: String::new(),
+                shell_generation: 0,
                 clipboard_clear_task: None,
                 log_pod_name: String::new(),
                 log_namespace: String::new(),
@@ -997,15 +1012,6 @@ impl App {
             }
         };
 
-        match pair.slave.spawn_command(cmd) {
-            Ok(_child) => {}
-            Err(e) => {
-                self.set_error(format!("Failed to spawn command: {e}"));
-                return;
-            }
-        }
-        drop(pair.slave);
-
         let reader = match pair.master.try_clone_reader() {
             Ok(r) => r,
             Err(e) => {
@@ -1022,21 +1028,34 @@ impl App {
             }
         };
 
+        let child: ShellChild = match pair.slave.spawn_command(cmd) {
+            Ok(child) => Arc::new(std::sync::Mutex::new(Some(child))),
+            Err(e) => {
+                self.set_error(format!("Failed to spawn command: {e}"));
+                return;
+            }
+        };
+        drop(pair.slave);
+
         let parser = vt100::Parser::new(pty_rows, pty_cols, 0);
 
+        let generation = self.shell_generation.wrapping_add(1);
+        self.shell_generation = generation;
+
         let tx = self.event_tx.clone();
+        let reader_child = Arc::clone(&child);
         tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => {
-                        let _ = tx.send(KubeResourceEvent::ShellExited);
-                        break;
-                    }
+                    Ok(0) | Err(_) => break,
                     Ok(n) => {
                         if tx
-                            .send(KubeResourceEvent::ShellOutput(buf[..n].to_vec()))
+                            .send(KubeResourceEvent::ShellOutput(
+                                generation,
+                                buf[..n].to_vec(),
+                            ))
                             .is_err()
                         {
                             break;
@@ -1044,11 +1063,18 @@ impl App {
                     }
                 }
             }
+            let reaped = reader_child.lock().ok().and_then(|mut slot| slot.take());
+            if let Some(mut child) = reaped {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = tx.send(KubeResourceEvent::ShellExited(generation));
         });
 
         self.shell_session = Some(ShellSession {
             writer,
             parser,
+            child,
             _master: pair.master,
         });
         self.mode = AppMode::ShellView;
@@ -1367,6 +1393,7 @@ impl App {
             describe_hscroll: 0,
             shell_session: None,
             shell_title: String::new(),
+            shell_generation: 0,
             clipboard_clear_task: None,
             log_pod_name: String::new(),
             log_namespace: String::new(),
@@ -1523,6 +1550,54 @@ mod tests {
 
         assert_eq!(app.table_state.selected(), None);
         assert!(app.selected_indices.is_empty());
+    }
+
+    async fn await_shell_exit(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
+    ) -> u64 {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await.expect("event channel closed") {
+                    KubeResourceEvent::ShellExited(g) => return g,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("reader thread never reported the session exit")
+    }
+
+    #[tokio::test]
+    async fn reader_reaps_child_so_drop_cannot_signal_a_freed_pid() {
+        let (mut app, mut rx) = App::new_test_with_rx();
+        let mut cmd = portable_pty::CommandBuilder::new("sh");
+        cmd.args(["-c", "exit 0"]);
+
+        app.spawn_pty_session(cmd);
+        await_shell_exit(&mut rx).await;
+
+        let session = app.shell_session.as_ref().expect("session left in place");
+        assert!(
+            session.child.lock().expect("child slot poisoned").is_none(),
+            "reader must take the child out of the slot before reaping it"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_shell_session_kills_child_and_frees_reader() {
+        let (mut app, mut rx) = App::new_test_with_rx();
+        let mut cmd = portable_pty::CommandBuilder::new("sleep");
+        cmd.arg("120");
+
+        app.spawn_pty_session(cmd);
+        assert!(app.shell_session.is_some());
+        let generation = app.shell_generation;
+
+        app.shell_session = None;
+
+        let exited = await_shell_exit(&mut rx).await;
+
+        assert_eq!(exited, generation);
     }
 
     #[tokio::test]
