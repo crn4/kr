@@ -1,7 +1,7 @@
 use crate::app::{App, LOG_CHROME_LINES};
 use crate::k8s::teleport::Login as TeleportLogin;
 use crate::models::{
-    AppMode, ContextEntry, KubeResource, KubeResourceEvent, PendingAction, ResourceType,
+    AppMode, ContextEntry, KubeResourceEvent, PendingAction, PortForwardTarget, ResourceType,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -438,6 +438,7 @@ fn parse_port_input(input: &str) -> Option<(u16, u16)> {
 fn handle_port_forward_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
+            app.port_forward_target = None;
             app.mode = AppMode::List;
         }
         KeyCode::Enter => {
@@ -451,23 +452,25 @@ fn handle_port_forward_input(app: &mut App, key: KeyEvent) {
                         app.set_error(format!("Port {} already in use", local_port));
                         return;
                     }
-                    if let Some(res) = app.get_selected_resource() {
-                        let pod_name = res.name().to_owned();
-                        let namespace = app.current_namespace.clone();
-                        app.pending_action = Some(PendingAction::PortForward {
-                            pod_name,
-                            namespace,
-                            local_port,
-                            remote_port,
-                        });
-                        app.mode = AppMode::Confirm;
-                        return;
+                    match app.port_forward_target.take() {
+                        Some(target) => {
+                            app.pending_action = Some(PendingAction::PortForward {
+                                pod_name: target.pod_name,
+                                namespace: target.namespace,
+                                local_port,
+                                remote_port,
+                            });
+                            app.mode = AppMode::Confirm;
+                            return;
+                        }
+                        None => app.set_error("No pod selected".to_string()),
                     }
                 }
                 None => {
                     app.set_error("Invalid port format (use 8080:80 or 80)".to_string());
                 }
             }
+            app.port_forward_target = None;
             app.mode = AppMode::List;
         }
         KeyCode::Backspace => {
@@ -662,7 +665,11 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('p') if app.active_tab == ResourceType::Pod => {
-            if app.get_selected_resource().is_some() {
+            if let Some(pod) = app.get_selected_resource() {
+                app.port_forward_target = Some(PortForwardTarget {
+                    pod_name: pod.name().to_owned(),
+                    namespace: app.current_namespace.clone(),
+                });
                 app.port_forward_input.clear();
                 app.mode = AppMode::PortForwardInput;
             } else {
@@ -683,13 +690,10 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         {
             let names = collect_selected_names(app);
             if !names.is_empty() {
-                let count = names.len();
-                let kind = match app.active_tab {
-                    ResourceType::Pod => "pod(s)",
-                    ResourceType::Deployment => "deployment(s)",
-                    _ => "resource(s)",
-                };
-                app.pending_action = Some(PendingAction::DeleteResource { count, kind, names });
+                app.pending_action = Some(PendingAction::DeleteResource {
+                    resource: app.active_tab,
+                    names,
+                });
                 app.mode = AppMode::Confirm;
             } else {
                 app.set_error("No resource selected".to_string());
@@ -1111,56 +1115,33 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             if let Some(action) = app.pending_action.take() {
                 match action {
-                    PendingAction::DeleteResource { .. } => {
-                        let indices: Vec<usize> = if app.selected_indices.is_empty() {
-                            app.table_state.selected().into_iter().collect()
-                        } else {
-                            let mut v: Vec<usize> = app.selected_indices.iter().copied().collect();
-                            v.sort_unstable();
-                            v
-                        };
-                        for idx in indices {
-                            if let Some(item) = app.filtered_items.get(idx).cloned() {
-                                let client = app.client.clone();
-                                let ns = app.current_namespace.clone();
-                                let tx = app.event_tx.clone();
-                                match item {
-                                    KubeResource::Pod(p) => {
-                                        let name = p.metadata.name.clone().unwrap_or_default();
-                                        tokio::spawn(async move {
-                                            let result =
-                                                crate::k8s::actions::delete_pod(client, &ns, &name)
-                                                    .await;
-                                            let _ = tx.send(match result {
-                                                Ok(()) => KubeResourceEvent::Success(format!(
-                                                    "Pod '{name}' deleted"
-                                                )),
-                                                Err(e) => KubeResourceEvent::Error(format!(
-                                                    "Delete '{name}' failed: {e}"
-                                                )),
-                                            });
-                                        });
-                                    }
-                                    KubeResource::Deployment(d) => {
-                                        let name = d.metadata.name.clone().unwrap_or_default();
-                                        tokio::spawn(async move {
-                                            let result = crate::k8s::actions::delete_deployment(
-                                                client, &ns, &name,
-                                            )
-                                            .await;
-                                            let _ = tx.send(match result {
-                                                Ok(()) => KubeResourceEvent::Success(format!(
-                                                    "Deployment '{name}' deleted"
-                                                )),
-                                                Err(e) => KubeResourceEvent::Error(format!(
-                                                    "Delete '{name}' failed: {e}"
-                                                )),
-                                            });
-                                        });
-                                    }
-                                    KubeResource::Secret(_) => {}
-                                }
-                            }
+                    PendingAction::DeleteResource { resource, names } => {
+                        for name in names {
+                            let client = app.client.clone();
+                            let ns = app.current_namespace.clone();
+                            let tx = app.event_tx.clone();
+                            tokio::spawn(async move {
+                                let (result, label) = match resource {
+                                    ResourceType::Pod => (
+                                        crate::k8s::actions::delete_pod(client, &ns, &name).await,
+                                        "Pod",
+                                    ),
+                                    ResourceType::Deployment => (
+                                        crate::k8s::actions::delete_deployment(client, &ns, &name)
+                                            .await,
+                                        "Deployment",
+                                    ),
+                                    ResourceType::Secret => return,
+                                };
+                                let _ = tx.send(match result {
+                                    Ok(()) => KubeResourceEvent::Success(format!(
+                                        "{label} '{name}' deleted"
+                                    )),
+                                    Err(e) => KubeResourceEvent::Error(format!(
+                                        "Delete '{name}' failed: {e}"
+                                    )),
+                                });
+                            });
                         }
                     }
                     PendingAction::RestartDeployment { names } => {
@@ -1792,8 +1773,7 @@ mod tests {
         let mut app = App::new_test();
         app.mode = AppMode::Confirm;
         app.pending_action = Some(PendingAction::DeleteResource {
-            count: 1,
-            kind: "pod(s)",
+            resource: ResourceType::Pod,
             names: vec!["test".into()],
         });
 
@@ -1807,8 +1787,7 @@ mod tests {
         let mut app = App::new_test();
         app.mode = AppMode::Confirm;
         app.pending_action = Some(PendingAction::DeleteResource {
-            count: 1,
-            kind: "pod(s)",
+            resource: ResourceType::Pod,
             names: vec!["test".into()],
         });
 
@@ -2419,6 +2398,67 @@ mod tests {
         );
     }
 
+    async fn drain_action_messages(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
+        count: usize,
+    ) -> Vec<String> {
+        let mut msgs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("action task did not report")
+                .expect("event channel closed");
+            msgs.push(match event {
+                KubeResourceEvent::Success(m) | KubeResourceEvent::Error(m) => m,
+                other => panic!("unexpected event: {other:?}"),
+            });
+        }
+        msgs
+    }
+
+    #[tokio::test]
+    async fn delete_targets_survive_watcher_refresh_before_confirm() {
+        let (mut app, mut rx) = App::new_test_with_rx();
+        app.active_tab = ResourceType::Deployment;
+        app.items = vec![
+            make_deployment("web"),
+            make_deployment("api"),
+            make_deployment("worker"),
+        ];
+        app.update_filter();
+        app.selected_indices.insert(0);
+        app.selected_indices.insert(2);
+        app.table_state.select(Some(1));
+
+        handle_input(&mut app, key(KeyCode::Char('D')));
+        assert_eq!(app.mode, AppMode::Confirm);
+        app.update_filter();
+        handle_input(&mut app, key(KeyCode::Char('y')));
+
+        let msgs = drain_action_messages(&mut rx, 2).await;
+        assert!(msgs.iter().any(|m| m.contains("'web'")), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.contains("'worker'")), "{msgs:?}");
+        assert!(!msgs.iter().any(|m| m.contains("'api'")), "{msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_uses_confirmed_names_not_cursor() {
+        let (mut app, mut rx) = App::new_test_with_rx();
+        app.active_tab = ResourceType::Pod;
+        app.items = vec![make_pod("web"), make_pod("api")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('D')));
+        app.items = vec![make_pod("api")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+        handle_input(&mut app, key(KeyCode::Char('y')));
+
+        let msgs = drain_action_messages(&mut rx, 1).await;
+        assert!(msgs[0].contains("'web'"), "{msgs:?}");
+    }
+
     #[tokio::test]
     async fn restart_no_deployment_selected() {
         let mut app = App::new_test();
@@ -2725,6 +2765,140 @@ mod tests {
         assert_eq!(app.mode, AppMode::List);
         assert_eq!(app.port_forwards.len(), 1);
         assert_eq!(app.port_forwards[0].local_port, 9090);
+    }
+
+    #[tokio::test]
+    async fn port_forward_target_survives_watcher_refresh_mid_input() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.items = vec![make_pod("web"), make_pod("api")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        for c in "8080:80".chars() {
+            handle_input(&mut app, key(KeyCode::Char(c)));
+        }
+        app.items = vec![make_pod("api"), make_pod("web")];
+        app.update_filter();
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::PortForward {
+                pod_name: "web".into(),
+                namespace: "default".into(),
+                local_port: 8080,
+                remote_port: 80
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn port_forward_target_survives_pod_disappearing() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.items = vec![make_pod("web")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        handle_input(&mut app, key(KeyCode::Char('8')));
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        app.items.clear();
+        app.update_filter();
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::PortForward {
+                pod_name: "web".into(),
+                namespace: "default".into(),
+                local_port: 80,
+                remote_port: 80
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn port_forward_busy_port_keeps_target_and_popup() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("web")];
+        app.table_state.select(Some(0));
+        app.port_forwards.push(crate::app::ActivePortForward {
+            id: 1,
+            pod_name: "other".into(),
+            namespace: "default".into(),
+            local_port: 8080,
+            remote_port: 80,
+            abort_handle: tokio::spawn(async {}).abort_handle(),
+            started_at: std::time::Instant::now(),
+        });
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        for c in "8080".chars() {
+            handle_input(&mut app, key(KeyCode::Char(c)));
+        }
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::PortForwardInput);
+        assert!(app.last_error.is_some());
+        assert_eq!(
+            app.port_forward_target,
+            Some(PortForwardTarget {
+                pod_name: "web".into(),
+                namespace: "default".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn port_forward_esc_clears_target() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("web")];
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        assert!(app.port_forward_target.is_some());
+        handle_input(&mut app, key(KeyCode::Esc));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.port_forward_target.is_none());
+    }
+
+    #[tokio::test]
+    async fn port_forward_enter_without_target_errors() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardInput;
+        app.port_forward_target = None;
+        app.port_forward_input = "8080:80".to_string();
+
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.pending_action.is_none());
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn port_forward_invalid_format_clears_target() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("web")];
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        handle_input(&mut app, key(KeyCode::Char('8')));
+        handle_input(&mut app, key(KeyCode::Char(':')));
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.port_forward_target.is_none());
+        assert!(app.last_error.is_some());
     }
 
     #[tokio::test]

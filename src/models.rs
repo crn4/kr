@@ -62,6 +62,17 @@ impl ResourceType {
         }
     }
 
+    pub fn noun(self, count: usize) -> &'static str {
+        match (self, count) {
+            (Self::Pod, 1) => "pod",
+            (Self::Pod, _) => "pods",
+            (Self::Deployment, 1) => "deployment",
+            (Self::Deployment, _) => "deployments",
+            (Self::Secret, 1) => "secret",
+            (Self::Secret, _) => "secrets",
+        }
+    }
+
     pub fn sort_column_count(self) -> usize {
         match self {
             Self::Pod => 5,
@@ -147,10 +158,15 @@ pub enum ContextEntry<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortForwardTarget {
+    pub pod_name: String,
+    pub namespace: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAction {
     DeleteResource {
-        count: usize,
-        kind: &'static str,
+        resource: ResourceType,
         names: Vec<String>,
     },
     RestartDeployment {
@@ -171,31 +187,23 @@ pub enum PendingAction {
 impl PendingAction {
     pub fn message(&self) -> String {
         match self {
-            Self::DeleteResource { count, kind, names } => {
-                if *count == 1 {
-                    format!(
-                        "Delete {} '{}'?",
-                        kind,
-                        names.first().map(|s| s.as_str()).unwrap_or("?")
-                    )
-                } else {
-                    format!("Delete {} {}?\n{}", count, kind, names.join(", "))
-                }
-            }
-            Self::RestartDeployment { names } => {
-                if names.len() == 1 {
-                    format!(
-                        "Rollout restart '{}'?",
-                        names.first().map(|s| s.as_str()).unwrap_or("?")
-                    )
-                } else {
-                    format!(
-                        "Rollout restart {} deployments?\n{}",
-                        names.len(),
-                        names.join(", ")
-                    )
-                }
-            }
+            Self::DeleteResource { resource, names } => match names.as_slice() {
+                [name] => format!("Delete {} '{name}'?", resource.noun(1)),
+                _ => format!(
+                    "Delete {} {}?\n{}",
+                    names.len(),
+                    resource.noun(names.len()),
+                    names.join(", ")
+                ),
+            },
+            Self::RestartDeployment { names } => match names.as_slice() {
+                [name] => format!("Rollout restart '{name}'?"),
+                _ => format!(
+                    "Rollout restart {} deployments?\n{}",
+                    names.len(),
+                    names.join(", ")
+                ),
+            },
             Self::ScaleDeployment { name, replicas } => {
                 if *replicas == 0 {
                     format!("Scale '{}' to 0 replicas?\nThis will stop all pods.", name)
@@ -270,6 +278,33 @@ mod tests {
         let pod = Pod::default();
         let res = KubeResource::Pod(Arc::new(pod));
         assert_eq!(res.name(), "");
+    }
+
+    #[test]
+    fn delete_message_single_uses_singular_noun() {
+        let msg = PendingAction::DeleteResource {
+            resource: ResourceType::Pod,
+            names: vec!["nginx".into()],
+        }
+        .message();
+        assert_eq!(msg, "Delete pod 'nginx'?");
+    }
+
+    #[test]
+    fn delete_message_multi_uses_plural_noun_and_lists() {
+        let msg = PendingAction::DeleteResource {
+            resource: ResourceType::Deployment,
+            names: vec!["web".into(), "api".into()],
+        }
+        .message();
+        assert_eq!(msg, "Delete 2 deployments?\nweb, api");
+    }
+
+    #[test]
+    fn resource_type_noun_pluralizes() {
+        assert_eq!(ResourceType::Pod.noun(1), "pod");
+        assert_eq!(ResourceType::Pod.noun(0), "pods");
+        assert_eq!(ResourceType::Secret.noun(3), "secrets");
     }
 
     #[test]

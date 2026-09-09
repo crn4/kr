@@ -1,6 +1,6 @@
 use crate::models::{
     AppMode, ContextEntry, KubeResource, KubeResourceEvent, NamespaceOrigin, PendingAction,
-    ResourceType, SortDirection,
+    PortForwardTarget, ResourceType, SortDirection,
 };
 use crate::state::AppState;
 use k8s_openapi::api::{
@@ -141,6 +141,7 @@ pub struct App {
     pub help_scroll: usize,
 
     pub port_forward_input: String,
+    pub port_forward_target: Option<PortForwardTarget>,
     pub port_forwards: Vec<ActivePortForward>,
     pub port_forward_list_state: ListState,
     pub port_forward_next_id: u64,
@@ -239,6 +240,7 @@ impl App {
                 help_return_mode: AppMode::List,
                 help_scroll: 0,
                 port_forward_input: String::new(),
+                port_forward_target: None,
                 port_forwards: Vec::new(),
                 port_forward_list_state: ListState::default(),
                 port_forward_next_id: 0,
@@ -1295,6 +1297,14 @@ impl App {
 
     #[cfg(test)]
     pub fn new_test() -> Self {
+        Self::new_test_with_rx().0
+    }
+
+    #[cfg(test)]
+    pub fn new_test_with_rx() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
+    ) {
         use bytes::Bytes;
         use tower::ServiceBuilder;
 
@@ -1305,9 +1315,9 @@ impl App {
                 .unwrap())
         });
         let client = Client::new(ServiceBuilder::new().service(mock_service), "default");
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        Self {
+        let app = Self {
             client,
             current_namespace: "default".to_string(),
             mode: AppMode::List,
@@ -1380,6 +1390,7 @@ impl App {
             help_return_mode: AppMode::List,
             help_scroll: 0,
             port_forward_input: String::new(),
+            port_forward_target: None,
             port_forwards: Vec::new(),
             port_forward_list_state: ListState::default(),
             port_forward_next_id: 0,
@@ -1388,7 +1399,8 @@ impl App {
                 no_persist: true,
                 ..Default::default()
             },
-        }
+        };
+        (app, rx)
     }
 
     pub fn pod_phase(p: &Pod) -> &str {
