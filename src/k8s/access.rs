@@ -52,7 +52,14 @@ pub fn status_is_relevant(status: &SubjectRulesReviewStatus) -> bool {
     status.incomplete || grants_relevant_access(&status.resource_rules)
 }
 
-async fn is_namespace_relevant(client: Client, namespace: String) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    Relevant(String),
+    Irrelevant(String),
+    Unknown,
+}
+
+async fn probe_namespace(client: Client, namespace: String) -> Verdict {
     let review = SelfSubjectRulesReview {
         spec: SelfSubjectRulesReviewSpec {
             namespace: Some(namespace.clone()),
@@ -61,44 +68,185 @@ async fn is_namespace_relevant(client: Client, namespace: String) -> Option<Stri
     };
     let api: Api<SelfSubjectRulesReview> = Api::all(client);
     match api.create(&PostParams::default(), &review).await {
-        Ok(result) => result.status.filter(status_is_relevant).map(|_| namespace),
+        Ok(result) => match result.status {
+            Some(status) if status_is_relevant(&status) => Verdict::Relevant(namespace),
+            Some(_) => Verdict::Irrelevant(namespace),
+            None => Verdict::Unknown,
+        },
         Err(e) => {
             tracing::debug!("rules review for '{namespace}' failed: {e}");
-            None
+            Verdict::Unknown
         }
     }
+}
+
+fn relevance_from(candidates: Vec<String>, verdicts: Vec<Verdict>) -> Relevance {
+    let total = candidates.len();
+    let mut relevant = Vec::new();
+    let mut probed = Vec::new();
+    let mut unanswered = 0;
+
+    for verdict in verdicts {
+        match verdict {
+            Verdict::Relevant(ns) => {
+                probed.push(ns.clone());
+                relevant.push(ns);
+            }
+            Verdict::Irrelevant(ns) => probed.push(ns),
+            Verdict::Unknown => unanswered += 1,
+        }
+    }
+
+    if unanswered > 0 {
+        tracing::warn!("{unanswered}/{total} namespaces did not answer the access probe");
+    }
+
+    if relevant.is_empty() {
+        tracing::warn!(
+            "{}/{total} namespaces answered and none was relevant, keeping all candidates",
+            probed.len()
+        );
+        return Relevance::Unfiltered(candidates);
+    }
+
+    relevant.sort();
+    probed.sort();
+    tracing::info!(
+        "{}/{total} namespaces relevant for this cluster",
+        relevant.len()
+    );
+    Relevance::Filtered { relevant, probed }
 }
 
 pub async fn filter_relevant(client: &Client, candidates: Vec<String>) -> Relevance {
     if candidates.is_empty() {
         return Relevance::Unfiltered(candidates);
     }
-    let total = candidates.len();
-    let mut relevant: Vec<String> = futures::stream::iter(candidates.clone())
-        .map(|ns| is_namespace_relevant(client.clone(), ns))
+    let verdicts: Vec<Verdict> = futures::stream::iter(candidates.clone())
+        .map(|ns| probe_namespace(client.clone(), ns))
         .buffer_unordered(PROBE_CONCURRENCY)
-        .filter_map(std::future::ready)
         .collect()
         .await;
 
-    if relevant.is_empty() {
-        tracing::warn!("no namespace passed the access probe, keeping all {total} candidates");
-        return Relevance::Unfiltered(candidates);
-    }
-    relevant.sort();
-    tracing::info!(
-        "{}/{total} namespaces relevant for this cluster",
-        relevant.len()
-    );
-    Relevance::Filtered {
-        relevant,
-        probed: candidates,
-    }
+    relevance_from(candidates, verdicts)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn probe_with(status: u16, body: &'static str) -> Verdict {
+        let service =
+            tower::service_fn(move |_req: http::Request<kube::client::Body>| async move {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .body(kube::client::Body::from(body.as_bytes().to_vec()))
+                        .unwrap(),
+                )
+            });
+        let client = Client::new(tower::ServiceBuilder::new().service(service), "default");
+        probe_namespace(client, "ns".to_string()).await
+    }
+
+    const BASELINE_RULES: &str = r#"{"kind":"SelfSubjectRulesReview","apiVersion":"authorization.k8s.io/v1","status":{"incomplete":false,"resourceRules":[{"verbs":["create"],"resources":["selfsubjectrulesreviews"]}],"nonResourceRules":[]}}"#;
+    const POD_LIST_RULES: &str = r#"{"kind":"SelfSubjectRulesReview","apiVersion":"authorization.k8s.io/v1","status":{"incomplete":false,"resourceRules":[{"verbs":["list"],"resources":["pods"]}],"nonResourceRules":[]}}"#;
+
+    #[tokio::test]
+    async fn a_transport_failure_is_unknown_not_a_rejection() {
+        assert_eq!(
+            probe_with(503, r#"{"kind":"Status"}"#).await,
+            Verdict::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_without_status_is_unknown() {
+        assert_eq!(
+            probe_with(
+                200,
+                r#"{"kind":"SelfSubjectRulesReview","apiVersion":"authorization.k8s.io/v1"}"#
+            )
+            .await,
+            Verdict::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn baseline_only_rules_are_a_rejection() {
+        assert_eq!(
+            probe_with(200, BASELINE_RULES).await,
+            Verdict::Irrelevant("ns".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_list_access_is_relevant_verdict() {
+        assert_eq!(
+            probe_with(200, POD_LIST_RULES).await,
+            Verdict::Relevant("ns".to_string())
+        );
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_unanswered_probe_is_not_a_rejection() {
+        let relevance = relevance_from(
+            names(&["ok-ns", "flaky-ns"]),
+            vec![Verdict::Relevant("ok-ns".into()), Verdict::Unknown],
+        );
+
+        let Relevance::Filtered { relevant, probed } = relevance else {
+            panic!("expected a filtered result");
+        };
+        assert_eq!(relevant, names(&["ok-ns"]));
+        assert_eq!(
+            probed,
+            names(&["ok-ns"]),
+            "a namespace whose probe never answered must not be superseded"
+        );
+    }
+
+    #[test]
+    fn a_rejected_probe_is_superseded() {
+        let relevance = relevance_from(
+            names(&["ok-ns", "denied-ns"]),
+            vec![
+                Verdict::Relevant("ok-ns".into()),
+                Verdict::Irrelevant("denied-ns".into()),
+            ],
+        );
+
+        let Relevance::Filtered { relevant, probed } = relevance else {
+            panic!("expected a filtered result");
+        };
+        assert_eq!(relevant, names(&["ok-ns"]));
+        assert_eq!(probed, names(&["denied-ns", "ok-ns"]));
+    }
+
+    #[test]
+    fn every_probe_failing_falls_open_to_the_full_list() {
+        let relevance =
+            relevance_from(names(&["a", "b"]), vec![Verdict::Unknown, Verdict::Unknown]);
+
+        assert_eq!(relevance, Relevance::Unfiltered(names(&["a", "b"])));
+    }
+
+    #[test]
+    fn every_probe_rejecting_still_falls_open() {
+        let relevance = relevance_from(
+            names(&["a", "b"]),
+            vec![
+                Verdict::Irrelevant("a".into()),
+                Verdict::Irrelevant("b".into()),
+            ],
+        );
+
+        assert_eq!(relevance, Relevance::Unfiltered(names(&["a", "b"])));
+    }
 
     fn rule(resources: &[&str], verbs: &[&str]) -> ResourceRule {
         ResourceRule {

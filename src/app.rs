@@ -777,7 +777,7 @@ impl App {
         };
 
         if !self.has_namespace() {
-            self.resolve_namespace(origin.is_verified());
+            self.resolve_namespace(origin.is_verified(), namespaces);
         }
         true
     }
@@ -786,8 +786,8 @@ impl App {
         !self.current_namespace.is_empty()
     }
 
-    fn resolve_namespace(&mut self, verified: bool) {
-        let choice = match self.available_namespaces.as_slice() {
+    fn resolve_namespace(&mut self, verified: bool, discovered: &[String]) {
+        let choice = match discovered {
             _ if !verified => None,
             [] => None,
             [only] => Some(only.clone()),
@@ -831,7 +831,7 @@ impl App {
                 Ok(ns_list) => {
                     let namespaces: Vec<String> = ns_list
                         .iter()
-                        .map(|n| n.metadata.name.clone().unwrap_or_default())
+                        .filter_map(|n| n.metadata.name.clone())
                         .collect();
                     let _ = tx.send(KubeResourceEvent::NamespacesLoaded {
                         context: ctx,
@@ -3329,6 +3329,32 @@ mod tests {
         app.app_state.add_namespace("ctx-a", "old-ns");
         assert!(app.apply_namespaces("ctx-a", &["new-ns".to_string()], &NamespaceOrigin::Listed));
         assert_eq!(app.available_namespaces, vec!["new-ns", "old-ns"]);
+    }
+
+    #[tokio::test]
+    async fn a_stale_default_never_beats_a_fresh_list() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.app_state.add_namespace("ctx-a", "default");
+
+        app.apply_namespaces("ctx-a", &["team-a".to_string()], &NamespaceOrigin::Listed);
+
+        assert_eq!(app.current_namespace, "team-a");
+        assert!(app.available_namespaces.contains(&"default".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_stale_entry_does_not_suppress_the_single_namespace_rule() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.app_state.add_namespace("ctx-a", "gone-ns");
+
+        app.apply_namespaces("ctx-a", &["team-a".to_string()], &NamespaceOrigin::Listed);
+
+        assert_eq!(app.current_namespace, "team-a");
+        assert_eq!(app.mode, AppMode::List);
     }
 
     #[tokio::test]
