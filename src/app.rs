@@ -83,7 +83,7 @@ pub struct App {
     pub filtered_items: Vec<KubeResource>,
     pub table_state: TableState,
     pub filter_query: String,
-    pub selected_indices: HashSet<usize>,
+    pub selected_names: HashSet<String>,
 
     pub selected_secret_decoded: Option<Vec<(String, String)>>,
     pub log_buffer: VecDeque<String>,
@@ -196,7 +196,7 @@ impl App {
                 filtered_items: Vec::new(),
                 table_state: TableState::default(),
                 filter_query: String::new(),
-                selected_indices: HashSet::new(),
+                selected_names: HashSet::new(),
                 selected_secret_decoded: None,
                 log_buffer: VecDeque::new(),
                 log_task: None,
@@ -490,9 +490,33 @@ impl App {
         self.reset_tab_state();
     }
 
-    pub(crate) fn reset_tab_state(&mut self) {
+    pub(crate) fn clear_selection(&mut self) {
         self.table_state.select(None);
-        self.selected_indices.clear();
+        self.selected_names.clear();
+    }
+
+    pub(crate) fn reset_for_scope_change(&mut self) {
+        self.clear_selection();
+        self.items.clear();
+        self.filtered_items.clear();
+        self.pod_store = None;
+        self.deployment_store = None;
+        self.secret_store = None;
+        self.tab_loading = [false; 3];
+        self.tab_loading_since = [None; 3];
+        self.tab_forbidden = [false; 3];
+        if self
+            .last_error
+            .as_ref()
+            .is_some_and(|e| e.starts_with("Access denied"))
+        {
+            self.last_error = None;
+            self.message_time = None;
+        }
+    }
+
+    pub(crate) fn reset_tab_state(&mut self) {
+        self.clear_selection();
         self.status_filter.clear();
     }
 
@@ -1359,7 +1383,7 @@ impl App {
             filtered_items: Vec::new(),
             table_state: TableState::default(),
             filter_query: String::new(),
-            selected_indices: HashSet::new(),
+            selected_names: HashSet::new(),
             selected_secret_decoded: None,
             log_buffer: VecDeque::new(),
             log_task: None,
@@ -1546,7 +1570,6 @@ impl App {
     }
 
     pub fn update_filter(&mut self) {
-        self.selected_indices.clear();
         let has_status = self.active_tab == ResourceType::Pod && !self.status_filter.is_empty();
         let has_query = !self.filter_query.is_empty();
 
@@ -1572,6 +1595,25 @@ impl App {
                 .cloned()
                 .collect();
         }
+        self.prune_selection();
+    }
+
+    fn prune_selection(&mut self) {
+        if self.selected_names.is_empty() {
+            return;
+        }
+        let visible: HashSet<&str> = self.filtered_items.iter().map(KubeResource::name).collect();
+        self.selected_names
+            .retain(|name| visible.contains(name.as_str()));
+    }
+
+    pub fn selected_in_display_order(&self) -> Vec<String> {
+        self.filtered_items
+            .iter()
+            .map(KubeResource::name)
+            .filter(|name| self.selected_names.contains(*name))
+            .map(str::to_owned)
+            .collect()
     }
 }
 
@@ -1626,17 +1668,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn namespace_switch_drops_selection_even_if_the_name_recurs() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("redis-0"), make_pod("web")];
+        app.update_filter();
+        app.selected_names.insert("redis-0".into());
+        app.table_state.select(Some(0));
+        app.tab_loading = [true; 3];
+        app.last_error = Some("Access denied: nope".to_string());
+
+        app.reset_for_scope_change();
+
+        assert!(app.selected_names.is_empty());
+        assert_eq!(app.table_state.selected(), None);
+        assert!(app.items.is_empty());
+        assert!(app.filtered_items.is_empty());
+        assert_eq!(app.tab_loading, [false; 3]);
+        assert!(app.last_error.is_none());
+
+        app.items = vec![make_pod("redis-0")];
+        app.update_filter();
+        assert!(app.selected_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_selection_drops_cursor_and_names_but_keeps_filters() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("redis-0")];
+        app.update_filter();
+        app.selected_names.insert("redis-0".into());
+        app.table_state.select(Some(0));
+        app.filter_query = "redis".to_string();
+        app.status_filter.insert("Running".to_string());
+
+        app.clear_selection();
+
+        assert!(app.selected_names.is_empty());
+        assert_eq!(app.table_state.selected(), None);
+        assert_eq!(app.filter_query, "redis");
+        assert!(app.status_filter.contains("Running"));
+    }
+
+    #[tokio::test]
+    async fn selection_survives_refresh_and_reorder() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("web"), make_pod("api"), make_pod("worker")];
+        app.update_filter();
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("worker".into());
+
+        app.items = vec![make_pod("worker"), make_pod("api"), make_pod("web")];
+        app.update_filter();
+
+        assert_eq!(app.selected_names.len(), 2);
+        assert_eq!(
+            app.selected_in_display_order(),
+            vec!["worker".to_string(), "web".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn selection_drops_a_resource_that_disappeared() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("web"), make_pod("api")];
+        app.update_filter();
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("api".into());
+
+        app.items = vec![make_pod("api")];
+        app.update_filter();
+
+        assert_eq!(app.selected_in_display_order(), vec!["api".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn selection_is_scoped_to_the_visible_list() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("web"), make_pod("api")];
+        app.update_filter();
+        app.selected_names.insert("web".into());
+
+        app.filter_query = "api".to_string();
+        app.update_filter();
+
+        assert!(app.selected_names.is_empty());
+    }
+
+    #[tokio::test]
     async fn tab_switch_clears_ui_state() {
         let mut app = App::new_test();
         app.items = vec![make_pod("a")];
         app.filtered_items = vec![make_pod("a")];
         app.table_state.select(Some(0));
-        app.selected_indices.insert(0);
+        app.selected_names.insert("a".into());
 
         app.next_tab();
 
         assert_eq!(app.table_state.selected(), None);
-        assert!(app.selected_indices.is_empty());
+        assert!(app.selected_names.is_empty());
     }
 
     async fn await_shell_exit(

@@ -370,22 +370,7 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
 
             watchers = SelectAll::new();
             watcher_active = [false; 3];
-            app.items.clear();
-            app.filtered_items.clear();
-            app.pod_store = None;
-            app.deployment_store = None;
-            app.secret_store = None;
-            app.tab_loading = [false; 3];
-            app.tab_loading_since = [None; 3];
-            app.tab_forbidden = [false; 3];
-            if app
-                .last_error
-                .as_ref()
-                .is_some_and(|e| e.starts_with("Access denied"))
-            {
-                app.last_error = None;
-                app.message_time = None;
-            }
+            app.reset_for_scope_change();
 
             ensure_watcher(&mut app, current_tab, &mut watchers, &mut watcher_active);
             app.refresh_items();

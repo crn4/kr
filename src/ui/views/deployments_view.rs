@@ -40,9 +40,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let rows: Vec<Row> = app
         .filtered_items
         .iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            let selected = app.selected_indices.contains(&idx);
+        .map(|item| {
+            let selected = app.selected_names.contains(item.name());
             let marker = if selected { "●" } else { " " };
 
             let KubeResource::Deployment(d) = item else {
@@ -97,10 +96,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let title: std::borrow::Cow<'static, str> = if app.selected_indices.is_empty() {
+    let title: std::borrow::Cow<'static, str> = if app.selected_names.is_empty() {
         "Deployments".into()
     } else {
-        format!("Deployments ({} selected)", app.selected_indices.len()).into()
+        format!("Deployments ({} selected)", app.selected_names.len()).into()
     };
 
     let widths: &[Constraint] = if wide {

@@ -385,17 +385,12 @@ fn handle_log_search_input(app: &mut App, key: KeyEvent) {
 }
 
 fn collect_selected_names(app: &App) -> Vec<String> {
-    if app.selected_indices.is_empty() {
+    if app.selected_names.is_empty() {
         app.get_selected_resource()
             .map(|r| vec![r.name().to_string()])
             .unwrap_or_default()
     } else {
-        let mut indices: Vec<usize> = app.selected_indices.iter().copied().collect();
-        indices.sort_unstable();
-        indices
-            .iter()
-            .filter_map(|&i| app.filtered_items.get(i).map(|r| r.name().to_string()))
-            .collect()
+        app.selected_in_display_order()
     }
 }
 
@@ -607,17 +602,24 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         }
 
         KeyCode::Char(' ') if app.active_tab != ResourceType::Secret => {
-            if let Some(i) = app.table_state.selected()
-                && !app.selected_indices.remove(&i)
+            if let Some(name) = app.get_selected_resource().map(|r| r.name().to_owned())
+                && !app.selected_names.remove(&name)
             {
-                app.selected_indices.insert(i);
+                app.selected_names.insert(name);
             }
         }
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.selected_indices.len() == app.filtered_items.len() {
-                app.selected_indices.clear();
+        KeyCode::Char('a')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && app.active_tab != ResourceType::Secret =>
+        {
+            if app.selected_names.len() == app.filtered_items.len() {
+                app.selected_names.clear();
             } else {
-                app.selected_indices = (0..app.filtered_items.len()).collect();
+                app.selected_names = app
+                    .filtered_items
+                    .iter()
+                    .map(|r| r.name().to_owned())
+                    .collect();
             }
         }
 
@@ -1202,12 +1204,12 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                         app.start_port_forward(&pod_name, &namespace, local_port, remote_port);
                     }
                 }
-                app.selected_indices.clear();
+                app.selected_names.clear();
             }
             app.mode = AppMode::List;
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            app.selected_indices.clear();
+            app.selected_names.clear();
             app.pending_action = None;
             app.mode = AppMode::List;
         }
@@ -1277,6 +1279,12 @@ mod tests {
         let mut pod = Pod::default();
         pod.metadata.name = Some(name.to_string());
         KubeResource::Pod(Arc::new(pod))
+    }
+
+    fn make_secret(name: &str) -> KubeResource {
+        let mut secret = k8s_openapi::api::core::v1::Secret::default();
+        secret.metadata.name = Some(name.to_string());
+        KubeResource::Secret(Arc::new(secret))
     }
 
     fn make_deployment(name: &str) -> KubeResource {
@@ -2398,8 +2406,8 @@ mod tests {
             make_deployment("api"),
             make_deployment("worker"),
         ];
-        app.selected_indices.insert(0);
-        app.selected_indices.insert(2);
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("worker".into());
         handle_input(&mut app, key(KeyCode::Char('r')));
         assert_eq!(app.mode, AppMode::Confirm);
         assert_eq!(
@@ -2439,8 +2447,8 @@ mod tests {
             make_deployment("api"),
             make_deployment("worker"),
         ];
-        app.selected_indices.insert(0);
-        app.selected_indices.insert(2);
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("worker".into());
         handle_input(&mut app, key(KeyCode::Char('S')));
         assert_eq!(app.mode, AppMode::ScaleInput);
         handle_input(&mut app, key(KeyCode::Char('0')));
@@ -2483,13 +2491,15 @@ mod tests {
             make_deployment("worker"),
         ];
         app.update_filter();
-        app.selected_indices.insert(0);
-        app.selected_indices.insert(2);
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("worker".into());
         app.table_state.select(Some(1));
 
         handle_input(&mut app, key(KeyCode::Char('D')));
         assert_eq!(app.mode, AppMode::Confirm);
+        app.items = vec![make_deployment("web"), make_deployment("api")];
         app.update_filter();
+        assert_eq!(app.selected_names.len(), 1);
         handle_input(&mut app, key(KeyCode::Char('y')));
 
         let msgs = drain_action_messages(&mut rx, 2).await;
@@ -2517,30 +2527,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scale_survives_watcher_refresh_mid_input() {
+    async fn ctrl_a_is_ignored_on_secrets_tab() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Secret;
+        app.items = vec![make_secret("db-creds"), make_secret("tls")];
+        app.update_filter();
+
+        handle_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+
+        assert!(app.selected_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scale_uses_the_captured_target_not_a_moved_cursor() {
         let mut app = App::new_test();
         app.active_tab = ResourceType::Deployment;
-        app.items = vec![
-            make_deployment("web"),
-            make_deployment("api"),
-            make_deployment("worker"),
-        ];
+        app.items = vec![make_deployment("web"), make_deployment("api")];
         app.update_filter();
-        app.selected_indices.insert(0);
-        app.selected_indices.insert(2);
-        app.table_state.select(Some(1));
+        app.table_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Char('S')));
-        handle_input(&mut app, key(KeyCode::Char('0')));
+        handle_input(&mut app, key(KeyCode::Char('2')));
+        app.items = vec![make_deployment("api"), make_deployment("web")];
         app.update_filter();
         handle_input(&mut app, key(KeyCode::Enter));
 
-        assert_eq!(app.mode, AppMode::Confirm);
         assert_eq!(
             app.pending_action,
             Some(PendingAction::ScaleDeployment {
-                names: vec!["web".into(), "worker".into()],
-                replicas: 0
+                names: vec!["web".into()],
+                replicas: 2
             })
         );
     }
@@ -2550,7 +2569,7 @@ mod tests {
         let mut app = App::new_test();
         app.active_tab = ResourceType::Deployment;
         app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
-        app.selected_indices.insert(1);
+        app.selected_names.insert("api".into());
         app.table_state.select(None);
         handle_input(&mut app, key(KeyCode::Char('S')));
         assert_eq!(app.mode, AppMode::ScaleInput);
@@ -2561,14 +2580,14 @@ mod tests {
         let mut app = App::new_test();
         app.active_tab = ResourceType::Deployment;
         app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
-        app.selected_indices.insert(0);
-        app.selected_indices.insert(1);
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("api".into());
 
         handle_input(&mut app, key(KeyCode::Char('S')));
         handle_input(&mut app, key(KeyCode::Esc));
 
         assert_eq!(app.mode, AppMode::List);
-        assert_eq!(app.selected_indices.len(), 2);
+        assert_eq!(app.selected_names.len(), 2);
         assert!(app.scale_targets.is_empty());
     }
 
@@ -2603,14 +2622,14 @@ mod tests {
         let mut app = App::new_test();
         app.active_tab = ResourceType::Deployment;
         app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
-        app.selected_indices.insert(0);
-        app.selected_indices.insert(1);
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("api".into());
         handle_input(&mut app, key(KeyCode::Char('S')));
         handle_input(&mut app, key(KeyCode::Char('2')));
         handle_input(&mut app, key(KeyCode::Enter));
         handle_input(&mut app, key(KeyCode::Char('y')));
         assert_eq!(app.mode, AppMode::List);
-        assert!(app.selected_indices.is_empty());
+        assert!(app.selected_names.is_empty());
         assert!(app.pending_action.is_none());
     }
 
@@ -2645,7 +2664,7 @@ mod tests {
         assert_eq!(app.active_tab, ResourceType::Pod);
         assert_eq!(app.filter_query, "catalog-backend-appliances");
         assert_eq!(app.table_state.selected(), None);
-        assert!(app.selected_indices.is_empty());
+        assert!(app.selected_names.is_empty());
     }
 
     #[tokio::test]
