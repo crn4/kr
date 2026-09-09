@@ -195,12 +195,18 @@ fn draw_scale_input(f: &mut Frame, app: &App) {
     let area = centered_fixed_rect(35, 5, f.area());
     f.render_widget(Clear, area);
 
+    let count = app.scale_targets.len();
+    let title: std::borrow::Cow<'static, str> = if count > 1 {
+        format!("Scale {} Deployments", count).into()
+    } else {
+        "Scale Deployment".into()
+    };
     let text = format!("Replicas: {}_", app.scale_input);
     let p = Paragraph::new(text)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Scale Deployment")
+                .title(title)
                 .style(STYLE_NORMAL),
         )
         .style(STYLE_NORMAL);

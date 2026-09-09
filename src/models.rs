@@ -173,7 +173,7 @@ pub enum PendingAction {
         names: Vec<String>,
     },
     ScaleDeployment {
-        name: String,
+        names: Vec<String>,
         replicas: u32,
     },
     PortForward {
@@ -204,11 +204,19 @@ impl PendingAction {
                     names.join(", ")
                 ),
             },
-            Self::ScaleDeployment { name, replicas } => {
-                if *replicas == 0 {
-                    format!("Scale '{}' to 0 replicas?\nThis will stop all pods.", name)
+            Self::ScaleDeployment { names, replicas } => {
+                let warning = if *replicas == 0 {
+                    "\nThis will stop all pods."
                 } else {
-                    format!("Scale '{}' to {} replicas?", name, replicas)
+                    ""
+                };
+                match names.as_slice() {
+                    [name] => format!("Scale '{name}' to {replicas} replicas?{warning}"),
+                    _ => format!(
+                        "Scale {} deployments to {replicas} replicas?\n{}{warning}",
+                        names.len(),
+                        names.join(", ")
+                    ),
                 }
             }
             Self::PortForward {
@@ -305,6 +313,50 @@ mod tests {
         assert_eq!(ResourceType::Pod.noun(1), "pod");
         assert_eq!(ResourceType::Pod.noun(0), "pods");
         assert_eq!(ResourceType::Secret.noun(3), "secrets");
+    }
+
+    #[test]
+    fn scale_message_single() {
+        let msg = PendingAction::ScaleDeployment {
+            names: vec!["web".into()],
+            replicas: 3,
+        }
+        .message();
+        assert_eq!(msg, "Scale 'web' to 3 replicas?");
+    }
+
+    #[test]
+    fn scale_message_single_zero_warns() {
+        let msg = PendingAction::ScaleDeployment {
+            names: vec!["web".into()],
+            replicas: 0,
+        }
+        .message();
+        assert!(msg.starts_with("Scale 'web' to 0 replicas?"));
+        assert!(msg.contains("This will stop all pods."));
+    }
+
+    #[test]
+    fn scale_message_multi_lists_names() {
+        let msg = PendingAction::ScaleDeployment {
+            names: vec!["web".into(), "api".into()],
+            replicas: 2,
+        }
+        .message();
+        assert_eq!(msg, "Scale 2 deployments to 2 replicas?\nweb, api");
+    }
+
+    #[test]
+    fn scale_message_multi_zero_warns_and_lists() {
+        let msg = PendingAction::ScaleDeployment {
+            names: vec!["web".into(), "api".into()],
+            replicas: 0,
+        }
+        .message();
+        assert_eq!(
+            msg,
+            "Scale 2 deployments to 0 replicas?\nweb, api\nThis will stop all pods."
+        );
     }
 
     #[test]

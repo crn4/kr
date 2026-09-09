@@ -701,7 +701,9 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         }
 
         KeyCode::Char('S') if app.active_tab == ResourceType::Deployment => {
-            if app.get_selected_resource().is_some() {
+            let names = collect_selected_names(app);
+            if !names.is_empty() {
+                app.scale_targets = names;
                 app.scale_input.clear();
                 app.mode = AppMode::ScaleInput;
             } else {
@@ -1079,6 +1081,7 @@ fn key_to_pty_bytes(key: KeyEvent) -> Vec<u8> {
 fn handle_scale_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
+            app.scale_targets.clear();
             app.mode = AppMode::List;
         }
         KeyCode::Enter => {
@@ -1089,15 +1092,21 @@ fn handle_scale_input(app: &mut App, key: KeyEvent) {
             if let Ok(replicas) = app.scale_input.parse::<u32>() {
                 if replicas > 1000 {
                     app.set_error("Replica count must be <= 1000".to_string());
-                } else if let Some(res) = app.get_selected_resource() {
-                    let name = res.name().to_owned();
-                    app.pending_action = Some(PendingAction::ScaleDeployment { name, replicas });
-                    app.mode = AppMode::Confirm;
-                    return;
+                } else {
+                    let names = std::mem::take(&mut app.scale_targets);
+                    if names.is_empty() {
+                        app.set_error("No deployment selected".to_string());
+                    } else {
+                        app.pending_action =
+                            Some(PendingAction::ScaleDeployment { names, replicas });
+                        app.mode = AppMode::Confirm;
+                        return;
+                    }
                 }
             } else {
                 app.set_error("Invalid number".to_string());
             }
+            app.scale_targets.clear();
             app.mode = AppMode::List;
         }
         KeyCode::Backspace => {
@@ -1163,23 +1172,26 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                             });
                         }
                     }
-                    PendingAction::ScaleDeployment { name, replicas } => {
-                        let client = app.client.clone();
-                        let ns = app.current_namespace.clone();
-                        let tx = app.event_tx.clone();
-                        tokio::spawn(async move {
-                            let result =
-                                crate::k8s::actions::scale_deployment(client, &ns, &name, replicas)
-                                    .await;
-                            let _ = tx.send(match result {
-                                Ok(()) => KubeResourceEvent::Success(format!(
-                                    "'{name}' scaled to {replicas} replicas"
-                                )),
-                                Err(e) => {
-                                    KubeResourceEvent::Error(format!("Scale '{name}' failed: {e}"))
-                                }
+                    PendingAction::ScaleDeployment { names, replicas } => {
+                        for name in names {
+                            let client = app.client.clone();
+                            let ns = app.current_namespace.clone();
+                            let tx = app.event_tx.clone();
+                            tokio::spawn(async move {
+                                let result = crate::k8s::actions::scale_deployment(
+                                    client, &ns, &name, replicas,
+                                )
+                                .await;
+                                let _ = tx.send(match result {
+                                    Ok(()) => KubeResourceEvent::Success(format!(
+                                        "'{name}' scaled to {replicas} replicas"
+                                    )),
+                                    Err(e) => KubeResourceEvent::Error(format!(
+                                        "Scale '{name}' failed: {e}"
+                                    )),
+                                });
                             });
-                        });
+                        }
                     }
                     PendingAction::PortForward {
                         pod_name,
@@ -2398,6 +2410,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn scale_single_deployment() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web")];
+        app.table_state.select(Some(0));
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        assert_eq!(app.mode, AppMode::ScaleInput);
+        handle_input(&mut app, key(KeyCode::Char('3')));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::ScaleDeployment {
+                names: vec!["web".into()],
+                replicas: 3
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn scale_multi_select_deployments() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![
+            make_deployment("web"),
+            make_deployment("api"),
+            make_deployment("worker"),
+        ];
+        app.selected_indices.insert(0);
+        app.selected_indices.insert(2);
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        assert_eq!(app.mode, AppMode::ScaleInput);
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::ScaleDeployment {
+                names: vec!["web".into(), "worker".into()],
+                replicas: 0
+            })
+        );
+    }
+
     async fn drain_action_messages(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
         count: usize,
@@ -2457,6 +2514,104 @@ mod tests {
 
         let msgs = drain_action_messages(&mut rx, 1).await;
         assert!(msgs[0].contains("'web'"), "{msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn scale_survives_watcher_refresh_mid_input() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.items = vec![
+            make_deployment("web"),
+            make_deployment("api"),
+            make_deployment("worker"),
+        ];
+        app.update_filter();
+        app.selected_indices.insert(0);
+        app.selected_indices.insert(2);
+        app.table_state.select(Some(1));
+
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        app.update_filter();
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::ScaleDeployment {
+                names: vec!["web".into(), "worker".into()],
+                replicas: 0
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn scale_opens_without_cursor_when_multi_selected() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
+        app.selected_indices.insert(1);
+        app.table_state.select(None);
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        assert_eq!(app.mode, AppMode::ScaleInput);
+    }
+
+    #[tokio::test]
+    async fn scale_esc_keeps_multi_selection() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
+        app.selected_indices.insert(0);
+        app.selected_indices.insert(1);
+
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        handle_input(&mut app, key(KeyCode::Esc));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert_eq!(app.selected_indices.len(), 2);
+        assert!(app.scale_targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scale_enter_without_targets_errors() {
+        let mut app = App::new_test();
+        app.mode = AppMode::ScaleInput;
+        app.active_tab = ResourceType::Deployment;
+        app.scale_targets.clear();
+        app.scale_input = "2".to_string();
+
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.pending_action.is_none());
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn scale_no_deployment_selected() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![];
+        app.table_state.select(None);
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn scale_confirm_clears_multi_selection() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
+        app.selected_indices.insert(0);
+        app.selected_indices.insert(1);
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        handle_input(&mut app, key(KeyCode::Char('2')));
+        handle_input(&mut app, key(KeyCode::Enter));
+        handle_input(&mut app, key(KeyCode::Char('y')));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.selected_indices.is_empty());
+        assert!(app.pending_action.is_none());
     }
 
     #[tokio::test]

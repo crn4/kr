@@ -97,6 +97,7 @@ pub struct App {
     pub secret_revealed: bool,
 
     pub scale_input: String,
+    pub scale_targets: Vec<String>,
 
     pub pending_action: Option<PendingAction>,
 
@@ -208,6 +209,7 @@ impl App {
                 secret_table_state: TableState::default(),
                 secret_revealed: false,
                 scale_input: String::new(),
+                scale_targets: Vec::new(),
                 pending_action: None,
                 describe_content: Vec::new(),
                 describe_scroll: 0,
@@ -1358,6 +1360,7 @@ impl App {
             secret_table_state: TableState::default(),
             secret_revealed: false,
             scale_input: String::new(),
+            scale_targets: Vec::new(),
             pending_action: None,
             describe_content: Vec::new(),
             describe_scroll: 0,
