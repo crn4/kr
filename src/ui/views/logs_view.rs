@@ -45,17 +45,25 @@ fn highlight_line<'a>(text: &'a str, needle_lower: &str) -> Line<'a> {
     }
 }
 
+pub(crate) fn mode_label(scroll_offset: Option<usize>, stream_ended: bool) -> &'static str {
+    if stream_ended {
+        "ENDED"
+    } else if scroll_offset.is_some() {
+        "PAUSED"
+    } else {
+        "FOLLOWING"
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let total_lines = app.log_buffer.len();
     let visible_height = area.height.saturating_sub(2) as usize;
 
-    let (scroll_offset, mode_label) = match app.log_scroll_offset {
-        None => (total_lines.saturating_sub(visible_height), "FOLLOWING"),
-        Some(offset) => (
-            offset.min(total_lines.saturating_sub(visible_height)),
-            "PAUSED",
-        ),
+    let scroll_offset = match app.log_scroll_offset {
+        None => total_lines.saturating_sub(visible_height),
+        Some(offset) => offset.min(total_lines.saturating_sub(visible_height)),
     };
+    let mode_label = mode_label(app.log_scroll_offset, app.log_stream_ended);
 
     let temp;
     let query_lower = if app.mode == AppMode::LogSearchInput {
@@ -114,6 +122,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_label_reports_a_dead_stream_instead_of_following() {
+        assert_eq!(mode_label(None, false), "FOLLOWING");
+        assert_eq!(mode_label(Some(3), false), "PAUSED");
+        assert_eq!(mode_label(None, true), "ENDED");
+        assert_eq!(mode_label(Some(3), true), "ENDED");
+    }
 
     fn span_texts<'a>(line: &'a Line<'a>) -> Vec<&'a str> {
         line.spans.iter().map(|s| s.content.as_ref()).collect()

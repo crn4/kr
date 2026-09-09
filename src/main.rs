@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
     init_tracing(true);
 
     eprintln!("Connecting to cluster...");
-    let client = k8s::client::default_client().await?;
+    let clients = k8s::client::default_clients().await?;
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let (app, event_rx) = app::App::new(client).await?;
+    let (app, event_rx) = app::App::new(clients).await?;
     event_loop::run(&mut terminal, app, event_rx).await?;
 
     Ok(())

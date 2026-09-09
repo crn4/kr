@@ -62,6 +62,7 @@ pub(crate) fn contains_ascii_ci(haystack: &str, needle_lower: &str) -> bool {
 
 pub struct App {
     pub client: Client,
+    pub log_stream_client: Client,
     pub current_namespace: String,
 
     pub mode: AppMode,
@@ -129,6 +130,7 @@ pub struct App {
     pub log_tail_lines: i64,
     pub log_loading_history: bool,
     pub log_generation: u64,
+    pub log_stream_ended: bool,
     pub log_history_exhausted: bool,
     pub log_history_task: Option<AbortHandle>,
 
@@ -167,11 +169,15 @@ pub struct App {
 
 impl App {
     pub async fn new(
-        client: Client,
+        clients: crate::k8s::client::Clients,
     ) -> anyhow::Result<(
         Self,
         tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
     )> {
+        let crate::k8s::client::Clients {
+            api: client,
+            log_stream: log_stream_client,
+        } = clients;
         let app_state = AppState::load();
         let context = crate::k8s::config::get_current_context().unwrap_or_default();
         let namespace = app_state
@@ -184,6 +190,7 @@ impl App {
         Ok((
             Self {
                 client,
+                log_stream_client,
                 current_namespace: namespace,
                 mode: AppMode::List,
                 active_tab: ResourceType::Pod,
@@ -237,6 +244,7 @@ impl App {
                 log_tail_lines: 100,
                 log_loading_history: false,
                 log_generation: 0,
+                log_stream_ended: false,
                 log_history_exhausted: false,
                 log_history_task: None,
                 status_filter: HashSet::new(),
@@ -558,6 +566,7 @@ impl App {
         self.log_scroll_offset = None;
         self.log_tail_lines = 100;
         self.log_loading_history = false;
+        self.log_stream_ended = false;
         self.log_history_exhausted = false;
         self.log_hscroll = 0;
         self.log_search_query.clear();
@@ -571,7 +580,7 @@ impl App {
         self.mode = AppMode::LogView;
 
         let abort = crate::k8s::actions::stream_pod_logs(
-            self.client.clone(),
+            self.log_stream_client.clone(),
             namespace,
             pod_name,
             self.event_tx.clone(),
@@ -1380,7 +1389,8 @@ impl App {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app = Self {
-            client,
+            client: client.clone(),
+            log_stream_client: client,
             current_namespace: "default".to_string(),
             mode: AppMode::List,
             active_tab: ResourceType::Pod,
@@ -1434,6 +1444,7 @@ impl App {
             log_tail_lines: 100,
             log_loading_history: false,
             log_generation: 0,
+            log_stream_ended: false,
             log_history_exhausted: false,
             log_history_task: None,
             status_filter: HashSet::new(),
@@ -2035,6 +2046,16 @@ mod tests {
         assert_eq!(app.log_buffer[2], "line3");
         assert_eq!(app.log_scroll_offset, Some(2));
         assert!(!app.log_loading_history);
+    }
+
+    #[tokio::test]
+    async fn a_new_stream_clears_the_ended_marker() {
+        let mut app = App::new_test();
+        app.log_stream_ended = true;
+
+        app.stream_logs("nginx", "default");
+
+        assert!(!app.log_stream_ended);
     }
 
     #[tokio::test]

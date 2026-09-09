@@ -1,6 +1,6 @@
 use anyhow::Result;
+use kube::Config;
 use kube::config::{KubeConfigOptions, Kubeconfig};
-use kube::{Client, Config};
 
 pub fn list_contexts() -> Result<Vec<String>> {
     let config = Kubeconfig::read()?;
@@ -34,14 +34,13 @@ pub fn configured_namespace_for_context(context: &str) -> Option<String> {
     })
 }
 
-pub async fn create_client_with_context(context: &str) -> Result<Client> {
+pub async fn create_client_with_context(context: &str) -> Result<super::client::Clients> {
     let options = KubeConfigOptions {
         context: Some(context.to_string()),
         ..Default::default()
     };
     let config = Config::from_kubeconfig(&options).await?;
-    let client = Client::try_from(config)?;
-    Ok(client)
+    super::client::from_config(config)
 }
 
 pub async fn list_contexts_async() -> Option<Vec<String>> {

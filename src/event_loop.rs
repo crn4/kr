@@ -163,9 +163,12 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
                 app.push_log_line(line);
             }
         }
-        KubeResourceEvent::LogError(generation, message) => {
+        KubeResourceEvent::LogStreamEnded(generation, failure) => {
             if generation == app.log_generation {
-                app.set_error(message);
+                app.log_stream_ended = true;
+                if let Some(message) = failure {
+                    app.set_error(message);
+                }
             }
         }
         KubeResourceEvent::LogHistory(generation, result) => {
@@ -328,9 +331,10 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
             let mut switched = false;
             if let Some((new_ctx, result)) = switch {
                 match result {
-                    Ok(client) => {
+                    Ok(clients) => {
                         app.stop_all_port_forwards();
-                        app.client = client;
+                        app.client = clients.api;
+                        app.log_stream_client = clients.log_stream;
                         let remembered = app
                             .app_state
                             .last_namespace(&new_ctx)
@@ -472,32 +476,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_log_error_is_not_shown_over_the_new_pod() {
+    async fn clean_stream_end_marks_the_view_without_an_error() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+
+        handle_channel_event(&mut app, KubeResourceEvent::LogStreamEnded(7, None));
+
+        assert!(app.log_stream_ended);
+        assert!(app.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_stream_marks_the_view_and_reports_why() {
         let mut app = App::new_test();
         app.log_generation = 7;
 
         handle_channel_event(
             &mut app,
-            KubeResourceEvent::LogError(6, "Log error: gone".into()),
+            KubeResourceEvent::LogStreamEnded(7, Some("Log stream ended: reset".into())),
         );
-        assert!(app.last_error.is_none());
+
+        assert!(app.log_stream_ended);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_stream_end_is_not_shown_over_the_new_pod() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
 
         handle_channel_event(
             &mut app,
-            KubeResourceEvent::LogError(7, "Log error: gone".into()),
+            KubeResourceEvent::LogStreamEnded(6, Some("Log error: gone".into())),
+        );
+        assert!(app.last_error.is_none());
+        assert!(!app.log_stream_ended);
+
+        handle_channel_event(
+            &mut app,
+            KubeResourceEvent::LogStreamEnded(7, Some("Log error: gone".into())),
         );
         assert!(app.last_error.is_some());
     }
 
     #[tokio::test]
-    async fn log_error_after_leaving_the_view_is_dropped() {
+    async fn stream_end_after_leaving_the_view_is_dropped() {
         let mut app = App::new_test();
         app.log_generation = 7;
         app.abort_log_stream();
 
         handle_channel_event(
             &mut app,
-            KubeResourceEvent::LogError(7, "Log error: gone".into()),
+            KubeResourceEvent::LogStreamEnded(7, Some("Log error: gone".into())),
         );
 
         assert!(app.last_error.is_none());
