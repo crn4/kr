@@ -558,7 +558,6 @@ impl App {
         self.log_scroll_offset = None;
         self.log_tail_lines = 100;
         self.log_loading_history = false;
-        self.log_generation += 1;
         self.log_history_exhausted = false;
         self.log_hscroll = 0;
         self.log_search_query.clear();
@@ -577,6 +576,7 @@ impl App {
             pod_name,
             self.event_tx.clone(),
             self.log_tail_lines,
+            self.log_generation,
         );
         self.log_task = Some(abort);
     }
@@ -602,11 +602,20 @@ impl App {
         self.log_history_task = Some(handle);
     }
 
-    pub fn merge_log_history(&mut self, generation: u64, mut lines: Vec<String>) {
+    pub fn merge_log_history(&mut self, generation: u64, result: Result<Vec<String>, String>) {
         if generation != self.log_generation {
-            self.log_loading_history = false;
             return;
         }
+
+        let mut lines = match result {
+            Ok(lines) => lines,
+            Err(message) => {
+                self.log_loading_history = false;
+                self.log_search_pending = false;
+                self.set_error(message);
+                return;
+            }
+        };
 
         if lines.len() < self.log_tail_lines as usize {
             self.log_history_exhausted = true;
@@ -705,6 +714,7 @@ impl App {
             handle.abort();
         }
         self.log_search_pending = false;
+        self.log_generation = self.log_generation.wrapping_add(1);
     }
 
     pub fn context_entry_count(&self) -> usize {
@@ -1986,7 +1996,7 @@ mod tests {
             "line4".into(),
             "line5".into(),
         ];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert_eq!(app.log_buffer.len(), 5);
         assert_eq!(app.log_buffer[0], "line1");
@@ -2017,7 +2027,7 @@ mod tests {
             "line7".into(),
             "line8".into(),
         ];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert_eq!(app.log_buffer.len(), 8);
         assert_eq!(app.log_buffer[0], "line1");
@@ -2028,17 +2038,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_history_fetch_releases_the_loading_flags() {
+        let mut app = App::new_test();
+        app.log_generation = 2;
+        app.log_loading_history = true;
+        app.log_search_pending = true;
+
+        app.merge_log_history(2, Err("Log history error: gone".into()));
+
+        assert!(!app.log_loading_history);
+        assert!(!app.log_search_pending);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_failed_history_leaves_the_current_fetch_alone() {
+        let mut app = App::new_test();
+        app.log_generation = 2;
+        app.log_loading_history = true;
+        app.log_search_pending = true;
+
+        app.merge_log_history(1, Err("Log history error: gone".into()));
+
+        assert!(app.log_loading_history);
+        assert!(app.log_search_pending);
+        assert!(app.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn leaving_the_log_view_bumps_the_generation() {
+        let mut app = App::new_test();
+        let before = app.log_generation;
+
+        app.abort_log_stream();
+
+        assert_ne!(app.log_generation, before);
+    }
+
+    #[tokio::test]
     async fn merge_log_history_discards_wrong_generation() {
         let mut app = App::new_test();
         app.log_generation = 2;
         app.log_buffer.push_back("current".into());
         app.log_loading_history = true;
 
-        app.merge_log_history(1, vec!["old".into(), "current".into()]);
+        app.merge_log_history(1, Ok(vec!["old".into(), "current".into()]));
 
         assert_eq!(app.log_buffer.len(), 1);
         assert_eq!(app.log_buffer[0], "current");
-        assert!(!app.log_loading_history);
+        assert!(
+            app.log_loading_history,
+            "a stale result must not clear the flag owned by the in-flight fetch"
+        );
     }
 
     #[tokio::test]
@@ -2049,7 +2100,7 @@ mod tests {
         app.log_buffer.push_back("line1".into());
         app.log_loading_history = true;
 
-        app.merge_log_history(1, vec!["line1".into()]);
+        app.merge_log_history(1, Ok(vec!["line1".into()]));
 
         assert!(app.log_history_exhausted);
     }
@@ -2066,7 +2117,7 @@ mod tests {
 
         let mut history: Vec<String> = (0..10).map(|i| format!("new{i}")).collect();
         history.push("existing0".into());
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert_eq!(app.log_buffer.len(), MAX_LOG_LINES);
         assert_eq!(app.log_buffer[0], "new8");
@@ -2316,7 +2367,7 @@ mod tests {
         app.log_loading_history = true;
 
         let history = vec!["target found".into(), "existing".into()];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert!(!app.log_search_pending);
         assert_eq!(app.log_search_match_line, Some(0));
@@ -2333,7 +2384,7 @@ mod tests {
         app.log_loading_history = true;
 
         let history = vec!["other line".into(), "existing".into()];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert!(!app.log_search_pending);
         assert!(app.last_success.as_ref().unwrap().contains("press n"));
@@ -2350,7 +2401,7 @@ mod tests {
         app.log_loading_history = true;
 
         let history = vec!["other line".into(), "existing".into()];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert!(!app.log_search_pending);
         assert!(app.last_error.as_ref().unwrap().contains("Not found"));
@@ -2367,7 +2418,7 @@ mod tests {
         app.log_loading_history = true;
 
         let history = vec!["new1".into(), "new2".into(), "match line".into()];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert_eq!(app.log_search_match_line, Some(2));
     }
@@ -3041,13 +3092,13 @@ mod tests {
 
         app.merge_log_history(
             1,
-            vec![
+            Ok(vec![
                 "line1".into(),
                 "line2".into(),
                 "line3".into(),
                 "line4".into(),
                 "line5".into(),
-            ],
+            ]),
         );
 
         assert_eq!(app.log_selection_anchor, Some(2));

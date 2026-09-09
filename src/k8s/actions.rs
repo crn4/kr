@@ -13,6 +13,7 @@ pub fn stream_pod_logs(
     pod_name: &str,
     tx: UnboundedSender<KubeResourceEvent>,
     tail_lines: i64,
+    generation: u64,
 ) -> tokio::task::AbortHandle {
     let namespace = namespace.to_owned();
     let pod_name = pod_name.to_owned();
@@ -28,14 +29,17 @@ pub fn stream_pod_logs(
             Ok(stream) => {
                 let mut lines = stream.lines();
                 while let Some(Ok(line)) = lines.next().await {
-                    if tx.send(KubeResourceEvent::Log(line)).is_err() {
+                    if tx.send(KubeResourceEvent::Log(generation, line)).is_err() {
                         break;
                     }
                 }
             }
             Err(e) => {
                 if tx
-                    .send(KubeResourceEvent::Error(format!("Log error: {e}")))
+                    .send(KubeResourceEvent::LogError(
+                        generation,
+                        format!("Log error: {e}"),
+                    ))
                     .is_err()
                 {
                     tracing::warn!("Failed to send log error event");
@@ -179,10 +183,13 @@ pub fn fetch_log_history(
                 while let Some(Ok(line)) = reader.next().await {
                     lines.push(line);
                 }
-                let _ = tx.send(KubeResourceEvent::LogHistory(generation, lines));
+                let _ = tx.send(KubeResourceEvent::LogHistory(generation, Ok(lines)));
             }
             Err(e) => {
-                let _ = tx.send(KubeResourceEvent::Error(format!("Log history error: {e}")));
+                let _ = tx.send(KubeResourceEvent::LogHistory(
+                    generation,
+                    Err(format!("Log history error: {e}")),
+                ));
             }
         }
     });

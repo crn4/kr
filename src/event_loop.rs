@@ -158,11 +158,18 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         KubeResourceEvent::Refresh
         | KubeResourceEvent::InitialListDone
         | KubeResourceEvent::WatcherForbidden(_) => {}
-        KubeResourceEvent::Log(line) => {
-            app.push_log_line(line);
+        KubeResourceEvent::Log(generation, line) => {
+            if generation == app.log_generation {
+                app.push_log_line(line);
+            }
         }
-        KubeResourceEvent::LogHistory(generation, lines) => {
-            app.merge_log_history(generation, lines);
+        KubeResourceEvent::LogError(generation, message) => {
+            if generation == app.log_generation {
+                app.set_error(message);
+            }
+        }
+        KubeResourceEvent::LogHistory(generation, result) => {
+            app.merge_log_history(generation, result);
         }
         KubeResourceEvent::Error(e) => {
             app.set_error(e);
@@ -449,6 +456,51 @@ mod tests {
             code: 404,
             ..Default::default()
         })
+    }
+
+    #[tokio::test]
+    async fn stale_log_line_never_reaches_the_new_pods_buffer() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+
+        handle_channel_event(&mut app, KubeResourceEvent::Log(6, "from-old-pod".into()));
+        assert!(app.log_buffer.is_empty());
+
+        handle_channel_event(&mut app, KubeResourceEvent::Log(7, "from-new-pod".into()));
+        assert_eq!(app.log_buffer.len(), 1);
+        assert_eq!(app.log_buffer[0], "from-new-pod");
+    }
+
+    #[tokio::test]
+    async fn stale_log_error_is_not_shown_over_the_new_pod() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+
+        handle_channel_event(
+            &mut app,
+            KubeResourceEvent::LogError(6, "Log error: gone".into()),
+        );
+        assert!(app.last_error.is_none());
+
+        handle_channel_event(
+            &mut app,
+            KubeResourceEvent::LogError(7, "Log error: gone".into()),
+        );
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn log_error_after_leaving_the_view_is_dropped() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+        app.abort_log_stream();
+
+        handle_channel_event(
+            &mut app,
+            KubeResourceEvent::LogError(7, "Log error: gone".into()),
+        );
+
+        assert!(app.last_error.is_none());
     }
 
     #[tokio::test]
