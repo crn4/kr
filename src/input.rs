@@ -497,8 +497,7 @@ fn handle_port_forward_list(app: &mut App, key: KeyEvent) {
                 if app.port_forwards.is_empty() {
                     app.mode = AppMode::List;
                 } else {
-                    let new_idx = idx.min(app.port_forwards.len().saturating_sub(1));
-                    app.port_forward_list_state.select(Some(new_idx));
+                    app.reselect_port_forward(None);
                 }
             }
         }
@@ -737,28 +736,18 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
                 let ctx = app.current_context.clone();
                 let tx = app.event_tx.clone();
                 tokio::spawn(async move {
-                    match tokio::process::Command::new("kubectl")
-                        .args(["describe", kind, &name, "-n", &ns, "--context", &ctx])
-                        .output()
-                        .await
+                    let event = match crate::k8s::kubectl::capture(
+                        &["describe", kind, &name, "-n", &ns, "--context", &ctx],
+                        crate::k8s::kubectl::DESCRIBE_TIMEOUT,
+                    )
+                    .await
                     {
-                        Ok(output) if output.status.success() => {
-                            let text = String::from_utf8_lossy(&output.stdout);
-                            let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-                            let _ = tx.send(KubeResourceEvent::DescribeReady(lines));
-                        }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            let _ = tx.send(KubeResourceEvent::Error(format!(
-                                "Describe failed: {}",
-                                stderr.trim()
-                            )));
-                        }
-                        Err(e) => {
-                            let _ =
-                                tx.send(KubeResourceEvent::Error(format!("Describe failed: {e}")));
-                        }
-                    }
+                        Ok(text) => KubeResourceEvent::DescribeReady(
+                            text.lines().map(|l| l.to_string()).collect(),
+                        ),
+                        Err(e) => KubeResourceEvent::Error(format!("Describe failed: {e}")),
+                    };
+                    let _ = tx.send(event);
                 });
             } else {
                 app.set_error("No resource selected".to_string());

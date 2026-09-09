@@ -222,12 +222,17 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         }
         KubeResourceEvent::PortForwardStopped { id, error } => {
             let user_stopped = app.port_forward_stopped_ids.remove(&id);
+            let selected = app.selected_port_forward_id();
             app.port_forwards.retain(|pf| pf.id != id);
             if !user_stopped && let Some(err) = error {
                 app.set_error(err);
             }
-            if app.mode == AppMode::PortForwardList && app.port_forwards.is_empty() {
-                app.mode = AppMode::List;
+            if app.mode == AppMode::PortForwardList {
+                if app.port_forwards.is_empty() {
+                    app.mode = AppMode::List;
+                } else {
+                    app.reselect_port_forward(selected);
+                }
             }
         }
     }
@@ -276,6 +281,10 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
         if app.should_quit {
             app.abort_log_stream();
             app.stop_all_port_forwards();
+            if let Some(handle) = app.take_pending_clipboard_clear() {
+                handle.abort();
+                crate::app::clear_clipboard_now();
+            }
             return Ok(());
         }
 

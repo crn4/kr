@@ -19,6 +19,12 @@ use tokio::task::AbortHandle;
 
 type ShellChild = Arc<std::sync::Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>;
 
+pub fn clear_clipboard_now() {
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let _ = clipboard.set_text(String::new());
+    }
+}
+
 pub struct ShellSession {
     pub writer: Box<dyn std::io::Write + Send>,
     pub parser: vt100::Parser,
@@ -715,6 +721,10 @@ impl App {
         }
     }
 
+    pub fn take_pending_clipboard_clear(&mut self) -> Option<AbortHandle> {
+        self.clipboard_clear_task.take()
+    }
+
     pub fn abort_log_stream(&mut self) {
         if let Some(handle) = self.log_task.take() {
             handle.abort();
@@ -846,20 +856,19 @@ impl App {
             };
 
             if !list_denied
-                && let Ok(output) = tokio::process::Command::new("kubectl")
-                    .args([
+                && let Ok(text) = crate::k8s::kubectl::capture(
+                    &[
                         "get",
                         "namespaces",
                         "--context",
                         &ctx,
                         "-o",
                         "jsonpath={.items[*].metadata.name}",
-                    ])
-                    .output()
-                    .await
-                && output.status.success()
+                    ],
+                    crate::k8s::kubectl::DISCOVERY_TIMEOUT,
+                )
+                .await
             {
-                let text = String::from_utf8_lossy(&output.stdout);
                 let namespaces: Vec<String> = text
                     .split_whitespace()
                     .map(|s| s.to_string())
@@ -994,6 +1003,23 @@ impl App {
             self.port_forward_stopped_ids.insert(pf.id);
             pf.abort_handle.abort();
         }
+    }
+
+    pub fn selected_port_forward_id(&self) -> Option<u64> {
+        let index = self.port_forward_list_state.selected()?;
+        self.port_forwards.get(index).map(|pf| pf.id)
+    }
+
+    pub fn reselect_port_forward(&mut self, id: Option<u64>) {
+        let index = id
+            .and_then(|id| self.port_forwards.iter().position(|pf| pf.id == id))
+            .or_else(|| {
+                self.port_forward_list_state
+                    .selected()
+                    .map(|i| i.min(self.port_forwards.len().saturating_sub(1)))
+            })
+            .or(Some(0));
+        self.port_forward_list_state.select(index);
     }
 
     pub fn is_local_port_in_use(&self, port: u16) -> bool {
@@ -1137,6 +1163,9 @@ impl App {
                     self.log_selection_cursor -= 1;
                 }
             }
+            self.log_search_match_line = self
+                .log_search_match_line
+                .and_then(|line| line.checked_sub(1));
         }
         self.log_buffer.push_back(line);
     }
@@ -2056,6 +2085,86 @@ mod tests {
         app.stream_logs("nginx", "default");
 
         assert!(!app.log_stream_ended);
+    }
+
+    #[tokio::test]
+    async fn eviction_shifts_the_search_match_line() {
+        let mut app = App::new_test();
+        for i in 0..MAX_LOG_LINES {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_search_match_line = Some(10);
+
+        app.push_log_line("new".into());
+
+        assert_eq!(app.log_search_match_line, Some(9));
+        assert_eq!(app.log_buffer[9], "line 10");
+    }
+
+    #[tokio::test]
+    async fn eviction_drops_a_search_match_that_falls_off_the_front() {
+        let mut app = App::new_test();
+        for i in 0..MAX_LOG_LINES {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_search_match_line = Some(0);
+
+        app.push_log_line("new".into());
+
+        assert_eq!(app.log_search_match_line, None);
+    }
+
+    fn active_forward(id: u64, port: u16) -> ActivePortForward {
+        ActivePortForward {
+            id,
+            pod_name: format!("pod-{id}"),
+            namespace: "default".into(),
+            local_port: port,
+            remote_port: 80,
+            abort_handle: tokio::spawn(async {}).abort_handle(),
+            started_at: std::time::Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_forward_dying_on_its_own_does_not_move_the_cursor() {
+        let mut app = App::new_test();
+        app.port_forwards = vec![
+            active_forward(1, 8001),
+            active_forward(2, 8002),
+            active_forward(3, 8003),
+        ];
+        app.port_forward_list_state.select(Some(1));
+
+        let selected = app.selected_port_forward_id();
+        assert_eq!(selected, Some(2));
+        app.port_forwards.retain(|pf| pf.id != 1);
+        app.reselect_port_forward(selected);
+
+        assert_eq!(app.selected_port_forward_id(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn losing_the_selected_forward_clamps_the_cursor() {
+        let mut app = App::new_test();
+        app.port_forwards = vec![active_forward(1, 8001), active_forward(2, 8002)];
+        app.port_forward_list_state.select(Some(1));
+
+        let selected = app.selected_port_forward_id();
+        app.port_forwards.retain(|pf| pf.id != 2);
+        app.reselect_port_forward(selected);
+
+        assert_eq!(app.port_forward_list_state.selected(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn pending_clipboard_clear_is_taken_once() {
+        let mut app = App::new_test();
+        assert!(app.take_pending_clipboard_clear().is_none());
+
+        app.clipboard_clear_task = Some(tokio::spawn(async {}).abort_handle());
+        assert!(app.take_pending_clipboard_clear().is_some());
+        assert!(app.take_pending_clipboard_clear().is_none());
     }
 
     #[tokio::test]
