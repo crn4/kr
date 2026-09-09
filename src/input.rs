@@ -7,6 +7,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 
 pub fn handle_input(app: &mut App, key: KeyEvent) {
+    if app.mode != AppMode::ShellView
+        && key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        app.should_quit = true;
+        return;
+    }
     match app.mode {
         AppMode::FilterInput => handle_filter_input(app, key),
         AppMode::SecretDecode => handle_secret_modal_input(app, key),
@@ -535,9 +542,6 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Tab => app.next_tab(),
         KeyCode::BackTab => app.prev_tab(),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
-        }
         KeyCode::Char('c') => {
             let current_idx = app
                 .available_contexts
@@ -1025,13 +1029,25 @@ fn handle_shell_input(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn control_byte(c: char) -> Option<u8> {
+    match c {
+        'a'..='z' => Some(c as u8 - b'a' + 1),
+        'A'..='Z' => Some(c as u8 - b'A' + 1),
+        ' ' | '@' => Some(0),
+        '4'..='7' => Some(c as u8 - b'4' + 0x1c),
+        '[' | '\\' | ']' | '^' | '_' => Some(c as u8 - 0x40),
+        '?' => Some(0x7f),
+        _ => None,
+    }
+}
+
 fn key_to_pty_bytes(key: KeyEvent) -> Vec<u8> {
     let has_alt = key.modifiers.contains(KeyModifiers::ALT);
 
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && let KeyCode::Char(c) = key.code
+        && let Some(code) = control_byte(c)
     {
-        let code = (c as u8).wrapping_sub(b'a').wrapping_add(1);
         if has_alt {
             return vec![0x1b, code];
         }
@@ -2513,6 +2529,86 @@ mod tests {
 
         let msgs = drain_action_messages(&mut rx, 1).await;
         assert!(msgs[0].contains("'web'"), "{msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_quits_from_a_text_input_instead_of_typing_c() {
+        for mode in [
+            AppMode::FilterInput,
+            AppMode::LogSearchInput,
+            AppMode::NamespaceSelect,
+        ] {
+            let mut app = App::new_test();
+            app.mode = mode;
+            app.namespace_typing = true;
+
+            handle_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            );
+
+            assert!(app.should_quit, "{mode:?} did not quit");
+            assert!(
+                app.filter_query.is_empty(),
+                "{mode:?} typed into the filter"
+            );
+            assert!(
+                app.log_search_input.is_empty(),
+                "{mode:?} typed into the search"
+            );
+            assert!(
+                app.namespace_input.is_empty(),
+                "{mode:?} typed into the namespace"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_still_reaches_the_pty() {
+        let mut app = App::new_test();
+        app.mode = AppMode::ShellView;
+
+        handle_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn control_bytes_cover_the_non_letter_keys() {
+        assert_eq!(control_byte('a'), Some(0x01));
+        assert_eq!(control_byte('A'), Some(0x01));
+        assert_eq!(control_byte(' '), Some(0x00));
+        assert_eq!(control_byte('@'), Some(0x00));
+        assert_eq!(control_byte('['), Some(0x1b));
+        assert_eq!(control_byte('4'), Some(0x1c));
+        assert_eq!(control_byte('5'), Some(0x1d));
+        assert_eq!(control_byte('7'), Some(0x1f));
+        assert_eq!(control_byte(']'), Some(0x1d));
+        assert_eq!(control_byte('_'), Some(0x1f));
+        assert_eq!(control_byte('?'), Some(0x7f));
+        assert_eq!(control_byte('é'), None);
+    }
+
+    #[test]
+    fn crossterm_reports_ctrl_bracket_as_a_digit() {
+        assert_eq!(
+            key_to_pty_bytes(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL)),
+            vec![0x1d],
+            "crossterm's legacy decoder maps 0x1C..=0x1F to '4'..='7'"
+        );
+        assert_eq!(
+            key_to_pty_bytes(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL)),
+            vec![0x1c]
+        );
+    }
+
+    #[test]
+    fn unmapped_control_chars_are_sent_literally_not_as_garbage() {
+        let bytes = key_to_pty_bytes(KeyEvent::new(KeyCode::Char('é'), KeyModifiers::CONTROL));
+        assert_eq!(bytes, "é".as_bytes());
     }
 
     #[tokio::test]

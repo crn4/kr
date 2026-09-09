@@ -19,6 +19,10 @@ use tokio::task::AbortHandle;
 
 type ShellChild = Arc<std::sync::Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>;
 
+fn scaled_to_80_percent(value: u16) -> u16 {
+    (u32::from(value) * 80 / 100) as u16
+}
+
 pub fn clear_clipboard_now() {
     if let Ok(mut clipboard) = arboard::Clipboard::new() {
         let _ = clipboard.set_text(String::new());
@@ -1064,8 +1068,8 @@ impl App {
         use portable_pty::{PtySize, native_pty_system};
 
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let pty_rows = (rows * 80 / 100).saturating_sub(2).max(10);
-        let pty_cols = (cols * 80 / 100).saturating_sub(2).max(40);
+        let pty_rows = scaled_to_80_percent(rows).saturating_sub(2).max(10);
+        let pty_cols = scaled_to_80_percent(cols).saturating_sub(2).max(40);
 
         let pty_system = native_pty_system();
         let pair = match pty_system.openpty(PtySize {
@@ -1182,21 +1186,26 @@ impl App {
         self.log_search_pending = false;
         let needle = &self.log_search_query;
         let len = self.log_buffer.len();
-        let start = self
-            .log_search_match_line
-            .and_then(|m| m.checked_sub(1))
-            .unwrap_or_else(|| {
+        let start = match self.log_search_match_line {
+            Some(0) => None,
+            Some(current) => Some(current - 1),
+            None => Some(
                 self.log_scroll_offset
                     .map(|o| (o + visible).min(len).saturating_sub(1))
-                    .unwrap_or(len.saturating_sub(1))
-            });
-        for idx in (0..=start).rev() {
-            if contains_ascii_ci(&self.log_buffer[idx], needle) {
-                self.log_search_match_line = Some(idx);
-                self.scroll_to_line(idx, visible);
-                return;
+                    .unwrap_or(len.saturating_sub(1)),
+            ),
+        };
+
+        if let Some(start) = start {
+            for idx in (0..=start).rev() {
+                if contains_ascii_ci(&self.log_buffer[idx], needle) {
+                    self.log_search_match_line = Some(idx);
+                    self.scroll_to_line(idx, visible);
+                    return;
+                }
             }
         }
+
         if self.log_history_exhausted {
             self.set_error("No more matches".to_string());
         } else {
@@ -2085,6 +2094,50 @@ mod tests {
         app.stream_logs("nginx", "default");
 
         assert!(!app.log_stream_ended);
+    }
+
+    #[tokio::test]
+    async fn search_at_the_top_of_the_buffer_loads_history() {
+        let mut app = App::new_test();
+        app.log_search_query = "err".into();
+        app.log_buffer = ["err zero", "quiet", "err ten"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        app.log_search_match_line = Some(0);
+        app.log_history_exhausted = false;
+
+        app.log_search_next_with_height(3);
+
+        assert!(
+            app.log_search_pending,
+            "reaching the top must fetch more history"
+        );
+        assert_eq!(app.log_search_match_line, Some(0));
+    }
+
+    #[tokio::test]
+    async fn search_at_the_top_reports_exhaustion_rather_than_jumping_forward() {
+        let mut app = App::new_test();
+        app.log_search_query = "err".into();
+        app.log_buffer = ["err zero", "quiet", "err ten"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        app.log_search_match_line = Some(0);
+        app.log_history_exhausted = true;
+
+        app.log_search_next_with_height(3);
+
+        assert_eq!(app.log_search_match_line, Some(0));
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn pty_size_does_not_overflow_on_a_very_tall_terminal() {
+        assert_eq!(scaled_to_80_percent(1000), 800);
+        assert_eq!(scaled_to_80_percent(u16::MAX), 52428);
+        assert_eq!(scaled_to_80_percent(24), 19);
     }
 
     #[tokio::test]

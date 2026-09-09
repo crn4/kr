@@ -115,7 +115,7 @@ static LOG_VISUAL_SECTIONS: &[Section] = &[(
         ("j/k ↑/↓     ", "Extend selection"),
         ("PgUp/PgDn    ", "Extend by page"),
         ("g / G        ", "Top / Bottom"),
-        ("y / Enter    ", "Copy selection (15s)"),
+        ("y / Enter    ", "Copy selection"),
         ("V / Esc / q  ", "Cancel"),
     ],
 )];

@@ -185,6 +185,19 @@ pub enum PendingAction {
     },
 }
 
+const MAX_LISTED_NAMES: usize = 20;
+
+pub(crate) fn join_names(names: &[String]) -> String {
+    if names.len() <= MAX_LISTED_NAMES {
+        return names.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        names[..MAX_LISTED_NAMES].join(", "),
+        names.len() - MAX_LISTED_NAMES
+    )
+}
+
 impl PendingAction {
     pub fn message(&self) -> String {
         match self {
@@ -194,7 +207,7 @@ impl PendingAction {
                     "Delete {} {}?\n{}",
                     names.len(),
                     resource.noun(names.len()),
-                    names.join(", ")
+                    join_names(names)
                 ),
             },
             Self::RestartDeployment { names } => match names.as_slice() {
@@ -202,7 +215,7 @@ impl PendingAction {
                 _ => format!(
                     "Rollout restart {} deployments?\n{}",
                     names.len(),
-                    names.join(", ")
+                    join_names(names)
                 ),
             },
             Self::ScaleDeployment { names, replicas } => {
@@ -216,7 +229,7 @@ impl PendingAction {
                     _ => format!(
                         "Scale {} deployments to {replicas} replicas?\n{}{warning}",
                         names.len(),
-                        names.join(", ")
+                        join_names(names)
                     ),
                 }
             }
@@ -287,6 +300,21 @@ mod tests {
         let pod = Pod::default();
         let res = KubeResource::Pod(Arc::new(pod));
         assert_eq!(res.name(), "");
+    }
+
+    #[test]
+    fn a_long_name_list_is_capped() {
+        let names: Vec<String> = (0..50).map(|i| format!("pod-{i}")).collect();
+        let joined = join_names(&names);
+        assert!(joined.starts_with("pod-0, pod-1,"));
+        assert!(joined.ends_with(", and 30 more"), "{joined}");
+        assert_eq!(joined.matches("pod-").count(), 20);
+    }
+
+    #[test]
+    fn a_short_name_list_is_listed_in_full() {
+        let names: Vec<String> = (0..3).map(|i| format!("pod-{i}")).collect();
+        assert_eq!(join_names(&names), "pod-0, pod-1, pod-2");
     }
 
     #[test]

@@ -82,10 +82,23 @@ fn state_path() -> PathBuf {
 impl AppState {
     pub fn load() -> Self {
         let path = state_path();
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let reason = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(state) => return state,
+                Err(e) => e.to_string(),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => e.to_string(),
+        };
+
+        let salvaged = path.with_extension("json.corrupt");
+        tracing::warn!(
+            "{} is not usable state ({reason}); keeping it as {} and starting fresh",
+            path.display(),
+            salvaged.display()
+        );
+        let _ = std::fs::rename(&path, &salvaged);
+        Self::default()
     }
 
     pub fn save(&self) {
