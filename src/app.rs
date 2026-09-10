@@ -932,11 +932,11 @@ impl App {
             self.filtered_namespaces
                 .clone_from(&self.available_namespaces);
         } else {
-            let query = self.namespace_input.to_lowercase();
+            let query = self.namespace_input.to_ascii_lowercase();
             self.filtered_namespaces = self
                 .available_namespaces
                 .iter()
-                .filter(|ns| ns.to_lowercase().contains(&query))
+                .filter(|ns| contains_ascii_ci(ns, &query))
                 .cloned()
                 .collect();
         }
@@ -1391,29 +1391,32 @@ impl App {
         match self.active_tab {
             ResourceType::Pod => {
                 if let Some(store) = &self.pod_store {
-                    self.items = store
-                        .state()
-                        .iter()
-                        .map(|p| KubeResource::Pod(Arc::clone(p)))
-                        .collect();
+                    self.items.extend(
+                        store
+                            .state()
+                            .iter()
+                            .map(|p| KubeResource::Pod(Arc::clone(p))),
+                    );
                 }
             }
             ResourceType::Deployment => {
                 if let Some(store) = &self.deployment_store {
-                    self.items = store
-                        .state()
-                        .iter()
-                        .map(|d| KubeResource::Deployment(Arc::clone(d)))
-                        .collect();
+                    self.items.extend(
+                        store
+                            .state()
+                            .iter()
+                            .map(|d| KubeResource::Deployment(Arc::clone(d))),
+                    );
                 }
             }
             ResourceType::Secret => {
                 if let Some(store) = &self.secret_store {
-                    self.items = store
-                        .state()
-                        .iter()
-                        .map(|s| KubeResource::Secret(Arc::clone(s)))
-                        .collect();
+                    self.items.extend(
+                        store
+                            .state()
+                            .iter()
+                            .map(|s| KubeResource::Secret(Arc::clone(s))),
+                    );
                 }
             }
         }
@@ -1652,7 +1655,7 @@ impl App {
         if !has_status && !has_query {
             self.filtered_items.clone_from(&self.items);
         } else {
-            let query = self.filter_query.to_lowercase();
+            let query = self.filter_query.to_ascii_lowercase();
             self.filtered_items = self
                 .items
                 .iter()
@@ -1664,7 +1667,7 @@ impl App {
                         return false;
                     }
                     if has_query {
-                        return item.name().to_lowercase().contains(&query);
+                        return contains_ascii_ci(item.name(), &query);
                     }
                     true
                 })
@@ -1890,6 +1893,20 @@ mod tests {
         let exited = await_shell_exit(&mut rx).await;
 
         assert_eq!(exited, generation);
+    }
+
+    #[tokio::test]
+    async fn filtering_is_case_insensitive_without_allocating_per_item() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("Web-Frontend"), make_pod("api")];
+        app.filter_query = "WEB".to_string();
+        app.update_filter();
+        assert_eq!(app.filtered_items.len(), 1);
+        assert_eq!(app.filtered_items[0].name(), "Web-Frontend");
+
+        app.filter_query = "web-front".to_string();
+        app.update_filter();
+        assert_eq!(app.filtered_items.len(), 1);
     }
 
     #[tokio::test]

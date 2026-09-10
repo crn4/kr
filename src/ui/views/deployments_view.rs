@@ -47,6 +47,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         body,
     );
 
+    let now = jiff::Timestamp::now();
     let rows: Vec<Row> = app.filtered_items[window_start..window_end]
         .iter()
         .map(|item| {
@@ -63,7 +64,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let ready = status.map_or(0, |s| s.ready_replicas.unwrap_or(0));
             let updated = status.map_or(0, |s| s.updated_replicas.unwrap_or(0));
             let available = status.map_or(0, |s| s.available_replicas.unwrap_or(0));
-            let age = crate::utils::get_resource_age(d.metadata.creation_timestamp.as_ref());
+            let age = crate::utils::resource_age_at(now, d.metadata.creation_timestamp.as_ref());
 
             let marker_style = if selected {
                 Style::default().fg(COLOR_STATUS_RUNNING)

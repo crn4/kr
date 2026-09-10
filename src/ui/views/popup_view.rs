@@ -32,12 +32,14 @@ fn draw_context_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
         .available_contexts
         .iter()
         .map(|ctx| {
-            let label = if *ctx == app.current_context {
-                format!("{ctx} (current)")
+            if *ctx == app.current_context {
+                ListItem::new(Line::from(vec![
+                    Span::raw(ctx.as_str()),
+                    Span::raw(" (current)"),
+                ]))
             } else {
-                ctx.clone()
-            };
-            ListItem::new(Span::raw(label))
+                ListItem::new(Span::raw(ctx.as_str()))
+            }
         })
         .chain(app.teleport.clusters().iter().map(|cluster| {
             ListItem::new(Line::from(vec![
@@ -67,14 +69,13 @@ fn draw_context_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect)
 }
 
 fn draw_namespace_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    if app.namespace_typing {
+    let list_area = if app.namespace_typing {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(area);
 
-        let input_text = format!("{}_", app.namespace_input);
-        let input = Paragraph::new(input_text)
+        let input = Paragraph::new(format!("{}_", app.namespace_input))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -83,37 +84,31 @@ fn draw_namespace_popup(f: &mut Frame, app: &mut App, area: ratatui::layout::Rec
             )
             .style(STYLE_NORMAL);
         f.render_widget(input, chunks[0]);
-
-        let list_items: Vec<ListItem> = app
-            .filtered_namespaces
-            .iter()
-            .map(|i| ListItem::new(Span::raw(i)))
-            .collect();
-
-        let list = List::new(list_items)
-            .block(Block::default().borders(Borders::ALL))
-            .highlight_style(STYLE_HIGHLIGHT)
-            .highlight_symbol(">> ");
-
-        f.render_stateful_widget(list, chunks[1], &mut app.popup_state);
+        chunks[1]
     } else {
-        let list_items: Vec<ListItem> = app
-            .filtered_namespaces
-            .iter()
-            .map(|i| ListItem::new(Span::raw(i)))
-            .collect();
+        area
+    };
 
-        let list = List::new(list_items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Select Namespace"),
-            )
-            .highlight_style(STYLE_HIGHLIGHT)
-            .highlight_symbol(">> ");
+    let block = if app.namespace_typing {
+        Block::default().borders(Borders::ALL)
+    } else {
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Select Namespace")
+    };
 
-        f.render_stateful_widget(list, area, &mut app.popup_state);
-    }
+    let list_items: Vec<ListItem> = app
+        .filtered_namespaces
+        .iter()
+        .map(|ns| ListItem::new(Span::raw(ns.as_str())))
+        .collect();
+
+    let list = List::new(list_items)
+        .block(block)
+        .highlight_style(STYLE_HIGHLIGHT)
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(list, list_area, &mut app.popup_state);
 }
 
 fn draw_status_filter_popup(f: &mut Frame, app: &mut App) {

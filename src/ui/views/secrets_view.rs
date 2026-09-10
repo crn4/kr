@@ -35,6 +35,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         body,
     );
 
+    let now = jiff::Timestamp::now();
     let rows: Vec<Row> = app.filtered_items[window_start..window_end]
         .iter()
         .map(|item| {
@@ -45,7 +46,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let name = s.metadata.name.as_deref().unwrap_or_default();
             let type_ = s.type_.as_deref().unwrap_or_default();
             let count = s.data.as_ref().map(|d| d.len()).unwrap_or(0);
-            let age = crate::utils::get_resource_age(s.metadata.creation_timestamp.as_ref());
+            let age = crate::utils::resource_age_at(now, s.metadata.creation_timestamp.as_ref());
 
             Row::new(vec![
                 Cell::from(" "),
@@ -128,11 +129,7 @@ pub fn draw_decode_modal(f: &mut Frame, app: &mut App) {
     let rows: Vec<Row> = decoded
         .iter()
         .map(|(k, v)| {
-            let display_val = if app.secret_revealed {
-                v.as_str().to_owned()
-            } else {
-                "********".to_owned()
-            };
+            let display_val: &str = if app.secret_revealed { v } else { "********" };
             Row::new(vec![Cell::from(k.as_str()), Cell::from(display_val)])
         })
         .collect();
