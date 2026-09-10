@@ -37,8 +37,17 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .height(1)
         .bottom_margin(1);
 
-    let rows: Vec<Row> = app
-        .filtered_items
+    let body = area
+        .height
+        .saturating_sub(crate::ui::components::TABLE_CHROME_LINES) as usize;
+    let (window_start, window_end, cursor) = crate::ui::components::visible_window(
+        app.table_state.offset(),
+        app.table_state.selected(),
+        app.filtered_items.len(),
+        body,
+    );
+
+    let rows: Vec<Row> = app.filtered_items[window_start..window_end]
         .iter()
         .map(|item| {
             let selected = app.selected_names.contains(item.name());
@@ -145,6 +154,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             .row_highlight_style(STYLE_HIGHLIGHT)
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
-        f.render_stateful_widget(t, area, &mut app.table_state);
+        let mut window_state =
+            ratatui::widgets::TableState::default().with_selected(cursor.map(|c| c - window_start));
+        f.render_stateful_widget(t, area, &mut window_state);
+        *app.table_state.offset_mut() = window_start;
+        app.table_state.select(cursor);
     }
 }

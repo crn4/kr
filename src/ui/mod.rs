@@ -15,6 +15,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap},
 };
 
+pub(crate) const FRAME_CHROME_LINES: u16 = 4;
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)

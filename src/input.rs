@@ -1,4 +1,7 @@
 use crate::app::{App, LOG_CHROME_LINES};
+use crate::ui::components::TABLE_CHROME_LINES;
+
+const TABLE_PAGE_CHROME: usize = (crate::ui::FRAME_CHROME_LINES + TABLE_CHROME_LINES) as usize;
 use crate::k8s::teleport::Login as TeleportLogin;
 use crate::models::{
     AppMode, ContextEntry, KubeResourceEvent, PendingAction, PortForwardTarget, ResourceType,
@@ -588,7 +591,7 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             let len = app.filtered_items.len();
             if len > 0 {
                 let page = crossterm::terminal::size()
-                    .map(|(_, h)| (h as usize).saturating_sub(8))
+                    .map(|(_, h)| (h as usize).saturating_sub(TABLE_PAGE_CHROME))
                     .unwrap_or(20);
                 let i = app.table_state.selected().unwrap_or(0);
                 app.table_state.select(Some((i + page).min(len - 1)));
@@ -597,7 +600,7 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         KeyCode::PageUp => {
             if !app.filtered_items.is_empty() {
                 let page = crossterm::terminal::size()
-                    .map(|(_, h)| (h as usize).saturating_sub(8))
+                    .map(|(_, h)| (h as usize).saturating_sub(TABLE_PAGE_CHROME))
                     .unwrap_or(20);
                 let i = app.table_state.selected().unwrap_or(0);
                 app.table_state.select(Some(i.saturating_sub(page)));

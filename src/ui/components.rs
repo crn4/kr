@@ -1,6 +1,34 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use std::borrow::Cow;
 
+pub(crate) const TABLE_CHROME_LINES: u16 = 4;
+
+pub(crate) fn visible_window(
+    offset: usize,
+    selected: Option<usize>,
+    len: usize,
+    body: usize,
+) -> (usize, usize, Option<usize>) {
+    if len == 0 {
+        return (0, 0, None);
+    }
+    let body = body.max(1);
+    let last = len - 1;
+    let selected = selected.map(|s| s.min(last));
+
+    let mut start = offset.min(last);
+    if let Some(s) = selected {
+        if s < start {
+            start = s;
+        } else if s >= start + body {
+            start = s + 1 - body;
+        }
+    }
+    start = start.min(len.saturating_sub(body));
+
+    (start, (start + body).min(len), selected)
+}
+
 pub fn build_sort_header(
     columns: &[&'static str],
     sort_col: usize,
@@ -50,6 +78,45 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_follows_the_cursor_down() {
+        assert_eq!(visible_window(0, Some(40), 500, 20), (21, 41, Some(40)));
+    }
+
+    #[test]
+    fn window_follows_the_cursor_up() {
+        assert_eq!(visible_window(300, Some(3), 500, 20), (3, 23, Some(3)));
+    }
+
+    #[test]
+    fn window_keeps_a_stable_offset_while_the_cursor_is_inside() {
+        assert_eq!(
+            visible_window(100, Some(105), 500, 20),
+            (100, 120, Some(105))
+        );
+    }
+
+    #[test]
+    fn window_clamps_a_cursor_past_the_end() {
+        assert_eq!(visible_window(0, Some(900), 500, 20), (480, 500, Some(499)));
+    }
+
+    #[test]
+    fn window_never_starts_past_the_last_page() {
+        assert_eq!(visible_window(490, None, 500, 20), (480, 500, None));
+    }
+
+    #[test]
+    fn window_handles_an_empty_list_and_a_zero_height_body() {
+        assert_eq!(visible_window(0, Some(0), 0, 20), (0, 0, None));
+        assert_eq!(visible_window(0, Some(7), 500, 0), (7, 8, Some(7)));
+    }
+
+    #[test]
+    fn window_shorter_than_the_body_shows_everything() {
+        assert_eq!(visible_window(0, Some(1), 3, 20), (0, 3, Some(1)));
+    }
 
     #[test]
     fn centered_rect_50_50() {
