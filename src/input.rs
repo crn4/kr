@@ -1019,7 +1019,7 @@ fn handle_shell_input(app: &mut App, key: KeyEvent) {
     use std::io::Write;
 
     if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.shell_session = None;
+        app.close_shell();
         app.mode = AppMode::List;
         return;
     }

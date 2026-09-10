@@ -81,24 +81,33 @@ fn state_path() -> PathBuf {
 
 impl AppState {
     pub fn load() -> Self {
-        let path = state_path();
-        let reason = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(state) => return state,
-                Err(e) => e.to_string(),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
-            Err(e) => e.to_string(),
+        Self::load_from(&state_path())
+    }
+
+    fn load_from(path: &Path) -> Self {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("cannot read {}: {e}; starting fresh", path.display());
+                }
+                return Self::default();
+            }
         };
 
-        let salvaged = path.with_extension("json.corrupt");
-        tracing::warn!(
-            "{} is not usable state ({reason}); keeping it as {} and starting fresh",
-            path.display(),
-            salvaged.display()
-        );
-        let _ = std::fs::rename(&path, &salvaged);
-        Self::default()
+        match serde_json::from_slice(&bytes) {
+            Ok(state) => state,
+            Err(e) => {
+                let salvaged = path.with_extension("json.corrupt");
+                tracing::warn!(
+                    "{} is not valid state ({e}); keeping it as {} and starting fresh",
+                    path.display(),
+                    salvaged.display()
+                );
+                let _ = std::fs::rename(path, &salvaged);
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self) {
@@ -244,6 +253,69 @@ mod tests {
         let state: AppState = serde_json::from_str(r#"{"namespaces":{"ctx1":["ns-a"]}}"#).unwrap();
         assert_eq!(state.get_namespaces("ctx1"), vec!["ns-a"]);
         assert!(state.last_namespace("ctx1").is_none());
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kr-state-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn corrupt_state_is_salvaged() {
+        let dir = temp_dir("corrupt");
+        let path = dir.join("state.json");
+        std::fs::write(&path, b"{not json").unwrap();
+
+        let state = AppState::load_from(&path);
+
+        assert!(state.namespaces.is_empty());
+        assert!(!path.exists(), "the corrupt file must be moved aside");
+        assert_eq!(
+            std::fs::read(dir.join("state.json.corrupt")).unwrap(),
+            b"{not json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_state_file_is_never_moved_aside() {
+        let dir = temp_dir("unreadable");
+        let path = dir.join("state.json");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let state = AppState::load_from(&path);
+
+        assert!(state.namespaces.is_empty());
+        assert!(
+            path.is_dir(),
+            "a transient read error must not touch the user's file"
+        );
+        assert!(!dir.join("state.json.corrupt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_state_file_is_not_an_error() {
+        let dir = temp_dir("missing");
+        let state = AppState::load_from(&dir.join("state.json"));
+
+        assert!(state.namespaces.is_empty());
+        assert!(!dir.join("state.json.corrupt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_state_round_trips() {
+        let dir = temp_dir("roundtrip");
+        let path = dir.join("state.json");
+        write_atomically(&path, r#"{"namespaces":{"ctx1":["ns-a"]}}"#).unwrap();
+
+        let state = AppState::load_from(&path);
+
+        assert_eq!(state.get_namespaces("ctx1"), vec!["ns-a"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -6,9 +6,14 @@ pub struct Clients {
     pub log_stream: Client,
 }
 
-pub fn from_config(config: Config) -> Result<Clients> {
+fn log_stream_config(config: &Config) -> Config {
     let mut streaming = config.clone();
     streaming.read_timeout = None;
+    streaming
+}
+
+pub fn from_config(config: Config) -> Result<Clients> {
+    let streaming = log_stream_config(&config);
     Ok(Clients {
         api: Client::try_from(config)?,
         log_stream: Client::try_from(streaming)?,
@@ -35,11 +40,15 @@ mod tests {
     #[test]
     fn log_stream_config_drops_the_read_timeout() {
         let config = base_config();
-        let mut streaming = config.clone();
-        streaming.read_timeout = None;
 
-        assert!(config.read_timeout.is_some());
-        assert!(streaming.read_timeout.is_none());
+        assert!(
+            log_stream_config(&config).read_timeout.is_none(),
+            "a follow stream must not be killed by the idle read timer"
+        );
+        assert!(
+            config.read_timeout.is_some(),
+            "the api client keeps kube's default"
+        );
     }
 
     #[tokio::test]

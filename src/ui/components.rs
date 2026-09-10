@@ -1,7 +1,37 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::{Table, TableState};
 use std::borrow::Cow;
 
 pub(crate) const TABLE_CHROME_LINES: u16 = 4;
+
+pub(crate) struct TableWindow {
+    pub start: usize,
+    pub end: usize,
+    pub cursor: Option<usize>,
+}
+
+impl TableWindow {
+    pub(crate) fn new(state: &TableState, len: usize, area: Rect) -> Self {
+        let body = area.height.saturating_sub(TABLE_CHROME_LINES) as usize;
+        let (start, end, cursor) = visible_window(state.offset(), state.selected(), len, body);
+        Self { start, end, cursor }
+    }
+
+    pub(crate) fn render(
+        &self,
+        f: &mut Frame,
+        table: Table<'_>,
+        area: Rect,
+        state: &mut TableState,
+    ) {
+        let mut window_state =
+            TableState::default().with_selected(self.cursor.map(|c| c - self.start));
+        f.render_stateful_widget(table, area, &mut window_state);
+        *state.offset_mut() = self.start;
+        state.select(self.cursor);
+    }
+}
 
 pub(crate) fn visible_window(
     offset: usize,

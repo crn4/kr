@@ -189,7 +189,7 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         }
         KubeResourceEvent::ShellExited(generation) => {
             if generation == app.shell_generation {
-                app.shell_session = None;
+                app.close_shell();
                 if app.mode == AppMode::ShellView {
                     app.mode = AppMode::List;
                     app.set_success("Shell session ended".to_string());
@@ -643,6 +643,22 @@ mod tests {
         );
 
         assert!(app.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn output_after_closing_the_shell_is_dropped() {
+        let mut app = App::new_test();
+        app.shell_generation = 7;
+        app.mode = AppMode::ShellView;
+
+        app.close_shell();
+        handle_channel_event(&mut app, KubeResourceEvent::ShellExited(7));
+
+        assert_eq!(
+            app.mode,
+            AppMode::ShellView,
+            "a session closed by Ctrl+Q must not have its own exit re-processed"
+        );
     }
 
     #[tokio::test]

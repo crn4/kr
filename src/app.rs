@@ -746,6 +746,11 @@ impl App {
         self.clipboard_clear_task.take()
     }
 
+    pub fn close_shell(&mut self) {
+        self.shell_session = None;
+        self.shell_generation = self.shell_generation.wrapping_add(1);
+    }
+
     pub fn abort_log_stream(&mut self) {
         if let Some(handle) = self.log_task.take() {
             handle.abort();
@@ -1129,8 +1134,8 @@ impl App {
 
         let parser = vt100::Parser::new(pty_rows, pty_cols, 0);
 
-        let generation = self.shell_generation.wrapping_add(1);
-        self.shell_generation = generation;
+        self.shell_generation = self.shell_generation.wrapping_add(1);
+        let generation = self.shell_generation;
 
         let tx = self.event_tx.clone();
         let reader_child = Arc::clone(&child);
@@ -1896,7 +1901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filtering_is_case_insensitive_without_allocating_per_item() {
+    async fn filtering_is_case_insensitive() {
         let mut app = App::new_test();
         app.items = vec![make_pod("Web-Frontend"), make_pod("api")];
         app.filter_query = "WEB".to_string();
@@ -2175,6 +2180,8 @@ mod tests {
     fn find_ascii_ci_empty_needle_is_none_while_contains_says_true() {
         assert_eq!(find_ascii_ci(b"anything", b"", 0), None);
         assert!(contains_ascii_ci("anything", ""));
+        assert!(!contains_ascii_ci("", "a"));
+        assert!(contains_ascii_ci("Level=ERROR", "level=error"));
     }
 
     #[test]
@@ -2192,13 +2199,6 @@ mod tests {
             at = pos + 3;
         }
         assert_eq!(found, vec![0, 6, 12]);
-    }
-
-    #[test]
-    fn contains_ascii_ci_keeps_the_empty_needle_contract() {
-        assert!(contains_ascii_ci("anything", ""));
-        assert!(!contains_ascii_ci("", "a"));
-        assert!(contains_ascii_ci("Level=ERROR", "level=error"));
     }
 
     #[tokio::test]
@@ -2238,8 +2238,8 @@ mod tests {
         assert!(app.last_error.is_some());
     }
 
-    #[tokio::test]
-    async fn pty_size_does_not_overflow_on_a_very_tall_terminal() {
+    #[test]
+    fn pty_size_does_not_overflow_on_a_very_tall_terminal() {
         assert_eq!(scaled_to_80_percent(1000), 800);
         assert_eq!(scaled_to_80_percent(u16::MAX), 52428);
         assert_eq!(scaled_to_80_percent(24), 19);
