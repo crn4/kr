@@ -17,23 +17,15 @@ fn highlight_line<'a>(text: &'a str, needle_lower: &str) -> Line<'a> {
     let needle_bytes = needle_lower.as_bytes();
     let mut spans = Vec::with_capacity(4);
     let mut start = 0;
-    while start + needle_len <= text_bytes.len() {
-        if let Some(pos) = text_bytes[start..]
-            .windows(needle_len)
-            .position(|w| w.eq_ignore_ascii_case(needle_bytes))
-        {
-            let abs = start + pos;
-            if abs > start {
-                spans.push(Span::raw(&text[start..abs]));
-            }
-            spans.push(Span::styled(
-                &text[abs..abs + needle_len],
-                STYLE_SEARCH_MATCH,
-            ));
-            start = abs + needle_len;
-        } else {
-            break;
+    while let Some(abs) = crate::app::find_ascii_ci(text_bytes, needle_bytes, start) {
+        if abs > start {
+            spans.push(Span::raw(&text[start..abs]));
         }
+        spans.push(Span::styled(
+            &text[abs..abs + needle_len],
+            STYLE_SEARCH_MATCH,
+        ));
+        start = abs + needle_len;
     }
     if start < text.len() {
         spans.push(Span::raw(&text[start..]));
@@ -122,6 +114,24 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multibyte_needle_slices_on_char_boundaries() {
+        for (text, needle) in [
+            ("日本語x", "本語"),
+            ("café au lait", "é"),
+            ("say \u{3c9}mega now", "\u{3c9}mega"),
+            ("日b", "b"),
+        ] {
+            let line = highlight_line(text, needle);
+            let rebuilt: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(rebuilt, text, "{text:?} / {needle:?} lost content");
+            assert!(
+                line.spans.iter().any(|s| s.style == STYLE_SEARCH_MATCH),
+                "{text:?} / {needle:?} did not highlight"
+            );
+        }
+    }
 
     #[test]
     fn mode_label_reports_a_dead_stream_instead_of_following() {

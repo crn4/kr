@@ -60,14 +60,31 @@ pub(crate) const MAX_LOG_LINES: usize = 10_000;
 pub(crate) const LOG_CHROME_LINES: usize = 6;
 pub(crate) const DEFAULT_NAMESPACE: &str = "default";
 
+pub(crate) fn find_ascii_ci(haystack: &[u8], needle_lower: &[u8], from: usize) -> Option<usize> {
+    let (&first, rest) = needle_lower.split_first()?;
+    let lower = first.to_ascii_lowercase();
+    let upper = first.to_ascii_uppercase();
+    let last_start = haystack.len().checked_sub(needle_lower.len())?;
+
+    let mut at = from;
+    while at <= last_start {
+        let offset = haystack[at..=last_start]
+            .iter()
+            .position(|&b| b == lower || b == upper)?;
+        let candidate = at + offset;
+        if haystack[candidate + 1..candidate + needle_lower.len()].eq_ignore_ascii_case(rest) {
+            return Some(candidate);
+        }
+        at = candidate + 1;
+    }
+    None
+}
+
 pub(crate) fn contains_ascii_ci(haystack: &str, needle_lower: &str) -> bool {
     if needle_lower.is_empty() {
         return true;
     }
-    haystack
-        .as_bytes()
-        .windows(needle_lower.len())
-        .any(|w| w.eq_ignore_ascii_case(needle_lower.as_bytes()))
+    find_ascii_ci(haystack.as_bytes(), needle_lower.as_bytes(), 0).is_some()
 }
 
 pub struct App {
@@ -2094,6 +2111,77 @@ mod tests {
         app.stream_logs("nginx", "default");
 
         assert!(!app.log_stream_ended);
+    }
+
+    fn windows_find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+        if needle.is_empty() || needle.len() > hay.len() {
+            return None;
+        }
+        hay[from..]
+            .windows(needle.len())
+            .position(|w| w.eq_ignore_ascii_case(needle))
+            .map(|p| p + from)
+    }
+
+    #[test]
+    fn find_ascii_ci_matches_a_plain_window_scan() {
+        let cases: &[(&str, &str)] = &[
+            ("", "a"),
+            ("a", ""),
+            ("short", "much longer needle"),
+            ("aaab", "aab"),
+            ("abcabcabd", "abcabd"),
+            ("MiXeD CaSe", "mixed"),
+            ("level=info level=error", "level=error"),
+            ("no match here", "zzz"),
+            ("eeeeeeeex", "eeeeeeeee"),
+            ("é level=error", "level=error"),
+        ];
+        for (hay, needle) in cases {
+            for from in 0..=hay.len() {
+                assert_eq!(
+                    find_ascii_ci(hay.as_bytes(), needle.as_bytes(), from),
+                    windows_find(hay.as_bytes(), needle.as_bytes(), from),
+                    "hay={hay:?} needle={needle:?} from={from}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn find_ascii_ci_tolerates_an_uppercase_needle() {
+        assert_eq!(find_ascii_ci(b"an error", b"ERROR", 0), Some(3));
+        assert!(contains_ascii_ci("an error", "ERROR"));
+    }
+
+    #[test]
+    fn find_ascii_ci_empty_needle_is_none_while_contains_says_true() {
+        assert_eq!(find_ascii_ci(b"anything", b"", 0), None);
+        assert!(contains_ascii_ci("anything", ""));
+    }
+
+    #[test]
+    fn find_ascii_ci_past_the_end_does_not_panic() {
+        assert_eq!(find_ascii_ci(b"short", b"s", 99), None);
+    }
+
+    #[test]
+    fn find_ascii_ci_reports_every_occurrence_in_order() {
+        let hay = b"ERR x err y Err";
+        let mut found = Vec::new();
+        let mut at = 0;
+        while let Some(pos) = find_ascii_ci(hay, b"err", at) {
+            found.push(pos);
+            at = pos + 3;
+        }
+        assert_eq!(found, vec![0, 6, 12]);
+    }
+
+    #[test]
+    fn contains_ascii_ci_keeps_the_empty_needle_contract() {
+        assert!(contains_ascii_ci("anything", ""));
+        assert!(!contains_ascii_ci("", "a"));
+        assert!(contains_ascii_ci("Level=ERROR", "level=error"));
     }
 
     #[tokio::test]
