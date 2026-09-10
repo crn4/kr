@@ -2745,12 +2745,12 @@ mod tests {
     async fn enter_on_deployment_switches_to_pods_with_filter() {
         let mut app = App::new_test();
         app.active_tab = ResourceType::Deployment;
-        app.filtered_items = vec![make_deployment("catalog-backend-appliances")];
+        app.filtered_items = vec![make_deployment("api-gateway-worker")];
         app.table_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Enter));
         assert_eq!(app.active_tab, ResourceType::Pod);
-        assert_eq!(app.filter_query, "catalog-backend-appliances");
+        assert_eq!(app.filter_query, "api-gateway-worker");
         assert_eq!(app.table_state.selected(), None);
         assert!(app.selected_names.is_empty());
     }
