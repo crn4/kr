@@ -239,13 +239,61 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
     app.dirty = true;
 }
 
+fn redraw_ticker() -> time::Interval {
+    let mut ticker = time::interval(Duration::from_millis(250));
+    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    ticker
+}
+
+#[cfg(unix)]
+struct ShutdownSignals {
+    terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+    interrupt: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ShutdownSignals {
+    fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            terminate: signal(SignalKind::terminate())?,
+            hangup: signal(SignalKind::hangup())?,
+            interrupt: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.terminate.recv() => "SIGTERM",
+            _ = self.hangup.recv() => "SIGHUP",
+            _ = self.interrupt.recv() => "SIGINT",
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ShutdownSignals;
+
+#[cfg(not(unix))]
+impl ShutdownSignals {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) -> &'static str {
+        std::future::pending().await
+    }
+}
+
 pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
     terminal: &mut Terminal<B>,
     mut app: App,
     mut event_rx: tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
 ) -> Result<()> {
     let mut reader = EventStream::new();
-    let mut ticker = time::interval(Duration::from_millis(250));
+    let mut ticker = redraw_ticker();
+    let mut shutdown_signals = ShutdownSignals::new()?;
 
     let mut current_tab = app.active_tab;
     let mut current_ns = app.current_namespace.clone();
@@ -417,6 +465,10 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
                 app.clear_stale_messages();
                 app.dirty = true;
             }
+            name = shutdown_signals.recv() => {
+                tracing::info!("received {name}, shutting down");
+                app.should_quit = true;
+            }
             Some(Ok(event)) = reader.next() => {
                if let Event::Key(key) = event {
                    handle_input(&mut app, key);
@@ -482,6 +534,57 @@ mod tests {
         handle_channel_event(&mut app, KubeResourceEvent::Log(7, "from-new-pod".into()));
         assert_eq!(app.log_buffer.len(), 1);
         assert_eq!(app.log_buffer[0], "from-new-pod");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_ui_does_not_replay_every_missed_tick() {
+        let mut ticker = redraw_ticker();
+        ticker.tick().await;
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        let mut immediate = 0;
+        while ticker.tick().now_or_never().is_some() {
+            immediate += 1;
+            assert!(immediate < 10, "ticker replayed the whole suspend");
+        }
+        assert_eq!(immediate, 1, "only the current tick should be due");
+    }
+
+    #[cfg(unix)]
+    static SIGNAL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(unix)]
+    async fn expect_signal(raise: i32, expected: &str) {
+        let _serialized = SIGNAL_TEST_LOCK.lock().await;
+        let mut signals = ShutdownSignals::new().expect("signal handlers");
+
+        unsafe {
+            libc::raise(raise);
+        }
+
+        let name = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+            .await
+            .expect("no signal arrived");
+        assert_eq!(name, expected);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hangup_asks_the_loop_to_quit() {
+        expect_signal(libc::SIGHUP, "SIGHUP").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_interrupt_asks_the_loop_to_quit() {
+        expect_signal(libc::SIGINT, "SIGINT").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminate_asks_the_loop_to_quit() {
+        expect_signal(libc::SIGTERM, "SIGTERM").await;
     }
 
     #[tokio::test]
