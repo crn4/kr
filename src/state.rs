@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
+static LAST_WRITTEN: Mutex<u64> = Mutex::new(0);
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AppState {
@@ -12,6 +17,61 @@ pub struct AppState {
     pub no_persist: bool,
 }
 
+fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let write = (|| {
+        let mut file = options.open(&tmp)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    })();
+
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    std::fs::rename(&tmp, path)
+}
+
+fn write_if_newer(last_written: &Mutex<u64>, path: &Path, contents: &str, seq: u64) -> bool {
+    let mut last = last_written
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seq <= *last {
+        tracing::debug!("skipping state snapshot {seq}, {last} is already on disk");
+        return false;
+    }
+    match write_atomically(path, contents) {
+        Ok(()) => {
+            *last = seq;
+            true
+        }
+        Err(e) => {
+            tracing::warn!("failed to persist state to {}: {e}", path.display());
+            false
+        }
+    }
+}
+
 fn state_path() -> PathBuf {
     let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("kr");
@@ -21,11 +81,33 @@ fn state_path() -> PathBuf {
 
 impl AppState {
     pub fn load() -> Self {
-        let path = state_path();
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        Self::load_from(&state_path())
+    }
+
+    fn load_from(path: &Path) -> Self {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("cannot read {}: {e}; starting fresh", path.display());
+                }
+                return Self::default();
+            }
+        };
+
+        match serde_json::from_slice(&bytes) {
+            Ok(state) => state,
+            Err(e) => {
+                let salvaged = path.with_extension("json.corrupt");
+                tracing::warn!(
+                    "{} is not valid state ({e}); keeping it as {} and starting fresh",
+                    path.display(),
+                    salvaged.display()
+                );
+                let _ = std::fs::rename(path, &salvaged);
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self) {
@@ -34,28 +116,9 @@ impl AppState {
         }
         let path = state_path();
         if let Ok(json) = serde_json::to_string_pretty(self) {
+            let seq = SAVE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
             tokio::task::spawn_blocking(move || {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(
-                            parent,
-                            std::fs::Permissions::from_mode(0o700),
-                        );
-                    }
-                }
-                let tmp = path.with_extension("tmp");
-                if std::fs::write(&tmp, &json).is_ok() {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ =
-                            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-                    }
-                    let _ = std::fs::rename(&tmp, &path);
-                }
+                write_if_newer(&LAST_WRITTEN, &path, &json, seq);
             });
         }
     }
@@ -190,6 +253,153 @@ mod tests {
         let state: AppState = serde_json::from_str(r#"{"namespaces":{"ctx1":["ns-a"]}}"#).unwrap();
         assert_eq!(state.get_namespaces("ctx1"), vec!["ns-a"]);
         assert!(state.last_namespace("ctx1").is_none());
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kr-state-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn corrupt_state_is_salvaged() {
+        let dir = temp_dir("corrupt");
+        let path = dir.join("state.json");
+        std::fs::write(&path, b"{not json").unwrap();
+
+        let state = AppState::load_from(&path);
+
+        assert!(state.namespaces.is_empty());
+        assert!(!path.exists(), "the corrupt file must be moved aside");
+        assert_eq!(
+            std::fs::read(dir.join("state.json.corrupt")).unwrap(),
+            b"{not json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_state_file_is_never_moved_aside() {
+        let dir = temp_dir("unreadable");
+        let path = dir.join("state.json");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let state = AppState::load_from(&path);
+
+        assert!(state.namespaces.is_empty());
+        assert!(
+            path.is_dir(),
+            "a transient read error must not touch the user's file"
+        );
+        assert!(!dir.join("state.json.corrupt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_state_file_is_not_an_error() {
+        let dir = temp_dir("missing");
+        let state = AppState::load_from(&dir.join("state.json"));
+
+        assert!(state.namespaces.is_empty());
+        assert!(!dir.join("state.json.corrupt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_state_round_trips() {
+        let dir = temp_dir("roundtrip");
+        let path = dir.join("state.json");
+        write_atomically(&path, r#"{"namespaces":{"ctx1":["ns-a"]}}"#).unwrap();
+
+        let state = AppState::load_from(&path);
+
+        assert_eq!(state.get_namespaces("ctx1"), vec!["ns-a"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_creates_the_file_private() {
+        let dir = std::env::temp_dir().join(format!("kr-state-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state.json");
+
+        write_atomically(&path, r#"{"namespaces":{}}"#).expect("write failed");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"namespaces":{}}"#
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "state file must not be world-readable");
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(dir_mode & 0o777, 0o700);
+        }
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|e| e.file_name() == "state.json"),
+            "the temp file must not survive a successful write"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_content() {
+        let dir = std::env::temp_dir().join(format!("kr-state-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state.json");
+
+        write_atomically(&path, "first-and-longer").unwrap();
+        write_atomically(&path, "second").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_older_snapshot_never_overwrites_a_newer_one() {
+        let dir = std::env::temp_dir().join(format!("kr-state-seq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state.json");
+        let last_written = Mutex::new(0);
+
+        assert!(write_if_newer(&last_written, &path, "second", 2));
+        assert!(!write_if_newer(&last_written, &path, "first", 1));
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+
+        assert!(write_if_newer(&last_written, &path, "third", 3));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "third");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_poisoned_save_lock_does_not_stop_later_writes() {
+        let dir = std::env::temp_dir().join(format!("kr-state-poison-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state.json");
+        let last_written = std::sync::Arc::new(Mutex::new(0u64));
+
+        let poisoner = std::sync::Arc::clone(&last_written);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(last_written.is_poisoned());
+
+        assert!(write_if_newer(&last_written, &path, "after", 1));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

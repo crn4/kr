@@ -9,11 +9,15 @@ use std::io;
 
 struct TerminalGuard;
 
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), crossterm::cursor::Show);
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = execute!(io::stdout(), crossterm::cursor::Show);
+        restore_terminal();
     }
 }
 
@@ -104,14 +108,16 @@ async fn main() -> Result<()> {
     init_tracing(true);
 
     eprintln!("Connecting to cluster...");
-    let client = k8s::client::default_client().await?;
+    let clients = k8s::client::default_clients().await?;
 
     let original_hook = std::panic::take_hook();
+    let main_thread = std::thread::current().id();
     std::panic::set_hook(Box::new(move |panic_info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = execute!(io::stdout(), crossterm::cursor::Show);
+        restore_terminal();
         original_hook(panic_info);
+        if std::thread::current().id() != main_thread {
+            std::process::abort();
+        }
     }));
 
     enable_raw_mode()?;
@@ -122,7 +128,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let (app, event_rx) = app::App::new(client).await?;
+    let (app, event_rx) = app::App::new(clients).await?;
     event_loop::run(&mut terminal, app, event_rx).await?;
 
     Ok(())

@@ -25,8 +25,11 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .height(1)
         .bottom_margin(1);
 
-    let rows: Vec<Row> = app
-        .filtered_items
+    let window =
+        crate::ui::components::TableWindow::new(&app.table_state, app.filtered_items.len(), area);
+
+    let now = jiff::Timestamp::now();
+    let rows: Vec<Row> = app.filtered_items[window.start..window.end]
         .iter()
         .map(|item| {
             let KubeResource::Secret(s) = item else {
@@ -36,7 +39,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let name = s.metadata.name.as_deref().unwrap_or_default();
             let type_ = s.type_.as_deref().unwrap_or_default();
             let count = s.data.as_ref().map(|d| d.len()).unwrap_or(0);
-            let age = crate::utils::get_resource_age(s.metadata.creation_timestamp.as_ref());
+            let age = crate::utils::resource_age_at(now, s.metadata.creation_timestamp.as_ref());
 
             Row::new(vec![
                 Cell::from(" "),
@@ -80,7 +83,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             .block(Block::default().borders(Borders::ALL).title("Secrets"));
         f.render_widget(empty, area);
     } else {
-        f.render_stateful_widget(t, area, &mut app.table_state);
+        window.render(f, t, area, &mut app.table_state);
     }
 }
 
@@ -115,11 +118,7 @@ pub fn draw_decode_modal(f: &mut Frame, app: &mut App) {
     let rows: Vec<Row> = decoded
         .iter()
         .map(|(k, v)| {
-            let display_val = if app.secret_revealed {
-                v.as_str().to_owned()
-            } else {
-                "********".to_owned()
-            };
+            let display_val: &str = if app.secret_revealed { v } else { "********" };
             Row::new(vec![Cell::from(k.as_str()), Cell::from(display_val)])
         })
         .collect();

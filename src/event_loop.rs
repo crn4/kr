@@ -158,11 +158,21 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         KubeResourceEvent::Refresh
         | KubeResourceEvent::InitialListDone
         | KubeResourceEvent::WatcherForbidden(_) => {}
-        KubeResourceEvent::Log(line) => {
-            app.push_log_line(line);
+        KubeResourceEvent::Log(generation, line) => {
+            if generation == app.log_generation {
+                app.push_log_line(line);
+            }
         }
-        KubeResourceEvent::LogHistory(generation, lines) => {
-            app.merge_log_history(generation, lines);
+        KubeResourceEvent::LogStreamEnded(generation, failure) => {
+            if generation == app.log_generation {
+                app.log_stream_ended = true;
+                if let Some(message) = failure {
+                    app.set_error(message);
+                }
+            }
+        }
+        KubeResourceEvent::LogHistory(generation, result) => {
+            app.merge_log_history(generation, result);
         }
         KubeResourceEvent::Error(e) => {
             app.set_error(e);
@@ -170,16 +180,20 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         KubeResourceEvent::Success(msg) => {
             app.set_success(msg);
         }
-        KubeResourceEvent::ShellOutput(data) => {
-            if let Some(session) = &mut app.shell_session {
+        KubeResourceEvent::ShellOutput(generation, data) => {
+            if generation == app.shell_generation
+                && let Some(session) = &mut app.shell_session
+            {
                 session.parser.process(&data);
             }
         }
-        KubeResourceEvent::ShellExited => {
-            app.shell_session = None;
-            if app.mode == AppMode::ShellView {
-                app.mode = AppMode::List;
-                app.set_success("Shell session ended".to_string());
+        KubeResourceEvent::ShellExited(generation) => {
+            if generation == app.shell_generation {
+                app.close_shell();
+                if app.mode == AppMode::ShellView {
+                    app.mode = AppMode::List;
+                    app.set_success("Shell session ended".to_string());
+                }
             }
         }
         KubeResourceEvent::DescribeReady(lines) => {
@@ -208,16 +222,68 @@ fn handle_channel_event(app: &mut App, event: KubeResourceEvent) {
         }
         KubeResourceEvent::PortForwardStopped { id, error } => {
             let user_stopped = app.port_forward_stopped_ids.remove(&id);
+            let selected = app.selected_port_forward_id();
             app.port_forwards.retain(|pf| pf.id != id);
             if !user_stopped && let Some(err) = error {
                 app.set_error(err);
             }
-            if app.mode == AppMode::PortForwardList && app.port_forwards.is_empty() {
-                app.mode = AppMode::List;
+            if app.mode == AppMode::PortForwardList {
+                if app.port_forwards.is_empty() {
+                    app.mode = AppMode::List;
+                } else {
+                    app.reselect_port_forward(selected);
+                }
             }
         }
     }
     app.dirty = true;
+}
+
+fn redraw_ticker() -> time::Interval {
+    let mut ticker = time::interval(Duration::from_millis(250));
+    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    ticker
+}
+
+#[cfg(unix)]
+struct ShutdownSignals {
+    terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+    interrupt: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ShutdownSignals {
+    fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            terminate: signal(SignalKind::terminate())?,
+            hangup: signal(SignalKind::hangup())?,
+            interrupt: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.terminate.recv() => "SIGTERM",
+            _ = self.hangup.recv() => "SIGHUP",
+            _ = self.interrupt.recv() => "SIGINT",
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ShutdownSignals;
+
+#[cfg(not(unix))]
+impl ShutdownSignals {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) -> &'static str {
+        std::future::pending().await
+    }
 }
 
 pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
@@ -226,7 +292,8 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
     mut event_rx: tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
 ) -> Result<()> {
     let mut reader = EventStream::new();
-    let mut ticker = time::interval(Duration::from_millis(250));
+    let mut ticker = redraw_ticker();
+    let mut shutdown_signals = ShutdownSignals::new()?;
 
     let mut current_tab = app.active_tab;
     let mut current_ns = app.current_namespace.clone();
@@ -262,6 +329,10 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
         if app.should_quit {
             app.abort_log_stream();
             app.stop_all_port_forwards();
+            if let Some(handle) = app.take_pending_clipboard_clear() {
+                handle.abort();
+                crate::app::clear_clipboard_now();
+            }
             return Ok(());
         }
 
@@ -317,9 +388,10 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
             let mut switched = false;
             if let Some((new_ctx, result)) = switch {
                 match result {
-                    Ok(client) => {
+                    Ok(clients) => {
                         app.stop_all_port_forwards();
-                        app.client = client;
+                        app.client = clients.api;
+                        app.log_stream_client = clients.log_stream;
                         let remembered = app
                             .app_state
                             .last_namespace(&new_ctx)
@@ -366,22 +438,7 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
 
             watchers = SelectAll::new();
             watcher_active = [false; 3];
-            app.items.clear();
-            app.filtered_items.clear();
-            app.pod_store = None;
-            app.deployment_store = None;
-            app.secret_store = None;
-            app.tab_loading = [false; 3];
-            app.tab_loading_since = [None; 3];
-            app.tab_forbidden = [false; 3];
-            if app
-                .last_error
-                .as_ref()
-                .is_some_and(|e| e.starts_with("Access denied"))
-            {
-                app.last_error = None;
-                app.message_time = None;
-            }
+            app.reset_for_scope_change();
 
             ensure_watcher(&mut app, current_tab, &mut watchers, &mut watcher_active);
             app.refresh_items();
@@ -407,6 +464,10 @@ pub async fn run<B: Backend<Error: Send + Sync + 'static> + std::io::Write>(
             _ = ticker.tick() => {
                 app.clear_stale_messages();
                 app.dirty = true;
+            }
+            name = shutdown_signals.recv() => {
+                tracing::info!("received {name}, shutting down");
+                app.should_quit = true;
             }
             Some(Ok(event)) = reader.next() => {
                if let Event::Key(key) = event {
@@ -460,6 +521,168 @@ mod tests {
             code: 404,
             ..Default::default()
         })
+    }
+
+    #[tokio::test]
+    async fn stale_log_line_never_reaches_the_new_pods_buffer() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+
+        handle_channel_event(&mut app, KubeResourceEvent::Log(6, "from-old-pod".into()));
+        assert!(app.log_buffer.is_empty());
+
+        handle_channel_event(&mut app, KubeResourceEvent::Log(7, "from-new-pod".into()));
+        assert_eq!(app.log_buffer.len(), 1);
+        assert_eq!(app.log_buffer[0], "from-new-pod");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_ui_does_not_replay_every_missed_tick() {
+        let mut ticker = redraw_ticker();
+        ticker.tick().await;
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        let mut immediate = 0;
+        while ticker.tick().now_or_never().is_some() {
+            immediate += 1;
+            assert!(immediate < 10, "ticker replayed the whole suspend");
+        }
+        assert_eq!(immediate, 1, "only the current tick should be due");
+    }
+
+    #[cfg(unix)]
+    static SIGNAL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(unix)]
+    async fn expect_signal(raise: i32, expected: &str) {
+        let _serialized = SIGNAL_TEST_LOCK.lock().await;
+        let mut signals = ShutdownSignals::new().expect("signal handlers");
+
+        unsafe {
+            libc::raise(raise);
+        }
+
+        let name = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+            .await
+            .expect("no signal arrived");
+        assert_eq!(name, expected);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hangup_asks_the_loop_to_quit() {
+        expect_signal(libc::SIGHUP, "SIGHUP").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_interrupt_asks_the_loop_to_quit() {
+        expect_signal(libc::SIGINT, "SIGINT").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminate_asks_the_loop_to_quit() {
+        expect_signal(libc::SIGTERM, "SIGTERM").await;
+    }
+
+    #[tokio::test]
+    async fn clean_stream_end_marks_the_view_without_an_error() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+
+        handle_channel_event(&mut app, KubeResourceEvent::LogStreamEnded(7, None));
+
+        assert!(app.log_stream_ended);
+        assert!(app.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_stream_marks_the_view_and_reports_why() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+
+        handle_channel_event(
+            &mut app,
+            KubeResourceEvent::LogStreamEnded(7, Some("Log stream ended: reset".into())),
+        );
+
+        assert!(app.log_stream_ended);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_stream_end_is_not_shown_over_the_new_pod() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+
+        handle_channel_event(
+            &mut app,
+            KubeResourceEvent::LogStreamEnded(6, Some("Log error: gone".into())),
+        );
+        assert!(app.last_error.is_none());
+        assert!(!app.log_stream_ended);
+
+        handle_channel_event(
+            &mut app,
+            KubeResourceEvent::LogStreamEnded(7, Some("Log error: gone".into())),
+        );
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_end_after_leaving_the_view_is_dropped() {
+        let mut app = App::new_test();
+        app.log_generation = 7;
+        app.abort_log_stream();
+
+        handle_channel_event(
+            &mut app,
+            KubeResourceEvent::LogStreamEnded(7, Some("Log error: gone".into())),
+        );
+
+        assert!(app.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn output_after_closing_the_shell_is_dropped() {
+        let mut app = App::new_test();
+        app.shell_generation = 7;
+        app.mode = AppMode::ShellView;
+
+        app.close_shell();
+        handle_channel_event(&mut app, KubeResourceEvent::ShellExited(7));
+
+        assert_eq!(
+            app.mode,
+            AppMode::ShellView,
+            "a session closed by Ctrl+Q must not have its own exit re-processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_shell_exit_does_not_end_the_live_session() {
+        let mut app = App::new_test();
+        app.shell_generation = 7;
+        app.mode = AppMode::ShellView;
+
+        handle_channel_event(&mut app, KubeResourceEvent::ShellExited(6));
+
+        assert_eq!(app.mode, AppMode::ShellView);
+        assert!(app.last_success.is_none());
+    }
+
+    #[tokio::test]
+    async fn current_shell_exit_ends_the_session() {
+        let mut app = App::new_test();
+        app.shell_generation = 7;
+        app.mode = AppMode::ShellView;
+
+        handle_channel_event(&mut app, KubeResourceEvent::ShellExited(7));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.last_success.is_some());
     }
 
     #[test]

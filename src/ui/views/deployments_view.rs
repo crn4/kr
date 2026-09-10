@@ -37,12 +37,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .height(1)
         .bottom_margin(1);
 
-    let rows: Vec<Row> = app
-        .filtered_items
+    let window =
+        crate::ui::components::TableWindow::new(&app.table_state, app.filtered_items.len(), area);
+
+    let now = jiff::Timestamp::now();
+    let rows: Vec<Row> = app.filtered_items[window.start..window.end]
         .iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            let selected = app.selected_indices.contains(&idx);
+        .map(|item| {
+            let selected = app.selected_names.contains(item.name());
             let marker = if selected { "●" } else { " " };
 
             let KubeResource::Deployment(d) = item else {
@@ -55,7 +57,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let ready = status.map_or(0, |s| s.ready_replicas.unwrap_or(0));
             let updated = status.map_or(0, |s| s.updated_replicas.unwrap_or(0));
             let available = status.map_or(0, |s| s.available_replicas.unwrap_or(0));
-            let age = crate::utils::get_resource_age(d.metadata.creation_timestamp.as_ref());
+            let age = crate::utils::resource_age_at(now, d.metadata.creation_timestamp.as_ref());
 
             let marker_style = if selected {
                 Style::default().fg(COLOR_STATUS_RUNNING)
@@ -97,10 +99,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let title: std::borrow::Cow<'static, str> = if app.selected_indices.is_empty() {
+    let title: std::borrow::Cow<'static, str> = if app.selected_names.is_empty() {
         "Deployments".into()
     } else {
-        format!("Deployments ({} selected)", app.selected_indices.len()).into()
+        format!("Deployments ({} selected)", app.selected_names.len()).into()
     };
 
     let widths: &[Constraint] = if wide {
@@ -146,6 +148,6 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             .row_highlight_style(STYLE_HIGHLIGHT)
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
-        f.render_stateful_widget(t, area, &mut app.table_state);
+        window.render(f, t, area, &mut app.table_state);
     }
 }

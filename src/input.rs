@@ -1,12 +1,22 @@
 use crate::app::{App, LOG_CHROME_LINES};
+use crate::ui::components::TABLE_CHROME_LINES;
+
+const TABLE_PAGE_CHROME: usize = (crate::ui::FRAME_CHROME_LINES + TABLE_CHROME_LINES) as usize;
 use crate::k8s::teleport::Login as TeleportLogin;
 use crate::models::{
-    AppMode, ContextEntry, KubeResource, KubeResourceEvent, PendingAction, ResourceType,
+    AppMode, ContextEntry, KubeResourceEvent, PendingAction, PortForwardTarget, ResourceType,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 
 pub fn handle_input(app: &mut App, key: KeyEvent) {
+    if app.mode != AppMode::ShellView
+        && key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        app.should_quit = true;
+        return;
+    }
     match app.mode {
         AppMode::FilterInput => handle_filter_input(app, key),
         AppMode::SecretDecode => handle_secret_modal_input(app, key),
@@ -385,17 +395,12 @@ fn handle_log_search_input(app: &mut App, key: KeyEvent) {
 }
 
 fn collect_selected_names(app: &App) -> Vec<String> {
-    if app.selected_indices.is_empty() {
+    if app.selected_names.is_empty() {
         app.get_selected_resource()
             .map(|r| vec![r.name().to_string()])
             .unwrap_or_default()
     } else {
-        let mut indices: Vec<usize> = app.selected_indices.iter().copied().collect();
-        indices.sort_unstable();
-        indices
-            .iter()
-            .filter_map(|&i| app.filtered_items.get(i).map(|r| r.name().to_string()))
-            .collect()
+        app.selected_in_display_order()
     }
 }
 
@@ -438,6 +443,7 @@ fn parse_port_input(input: &str) -> Option<(u16, u16)> {
 fn handle_port_forward_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
+            app.port_forward_target = None;
             app.mode = AppMode::List;
         }
         KeyCode::Enter => {
@@ -451,23 +457,25 @@ fn handle_port_forward_input(app: &mut App, key: KeyEvent) {
                         app.set_error(format!("Port {} already in use", local_port));
                         return;
                     }
-                    if let Some(res) = app.get_selected_resource() {
-                        let pod_name = res.name().to_owned();
-                        let namespace = app.current_namespace.clone();
-                        app.pending_action = Some(PendingAction::PortForward {
-                            pod_name,
-                            namespace,
-                            local_port,
-                            remote_port,
-                        });
-                        app.mode = AppMode::Confirm;
-                        return;
+                    match app.port_forward_target.take() {
+                        Some(target) => {
+                            app.pending_action = Some(PendingAction::PortForward {
+                                pod_name: target.pod_name,
+                                namespace: target.namespace,
+                                local_port,
+                                remote_port,
+                            });
+                            app.mode = AppMode::Confirm;
+                            return;
+                        }
+                        None => app.set_error("No pod selected".to_string()),
                     }
                 }
                 None => {
                     app.set_error("Invalid port format (use 8080:80 or 80)".to_string());
                 }
             }
+            app.port_forward_target = None;
             app.mode = AppMode::List;
         }
         KeyCode::Backspace => {
@@ -499,8 +507,7 @@ fn handle_port_forward_list(app: &mut App, key: KeyEvent) {
                 if app.port_forwards.is_empty() {
                     app.mode = AppMode::List;
                 } else {
-                    let new_idx = idx.min(app.port_forwards.len().saturating_sub(1));
-                    app.port_forward_list_state.select(Some(new_idx));
+                    app.reselect_port_forward(None);
                 }
             }
         }
@@ -538,9 +545,6 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Tab => app.next_tab(),
         KeyCode::BackTab => app.prev_tab(),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
-        }
         KeyCode::Char('c') => {
             let current_idx = app
                 .available_contexts
@@ -587,7 +591,7 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             let len = app.filtered_items.len();
             if len > 0 {
                 let page = crossterm::terminal::size()
-                    .map(|(_, h)| (h as usize).saturating_sub(8))
+                    .map(|(_, h)| (h as usize).saturating_sub(TABLE_PAGE_CHROME))
                     .unwrap_or(20);
                 let i = app.table_state.selected().unwrap_or(0);
                 app.table_state.select(Some((i + page).min(len - 1)));
@@ -596,7 +600,7 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         KeyCode::PageUp => {
             if !app.filtered_items.is_empty() {
                 let page = crossterm::terminal::size()
-                    .map(|(_, h)| (h as usize).saturating_sub(8))
+                    .map(|(_, h)| (h as usize).saturating_sub(TABLE_PAGE_CHROME))
                     .unwrap_or(20);
                 let i = app.table_state.selected().unwrap_or(0);
                 app.table_state.select(Some(i.saturating_sub(page)));
@@ -604,17 +608,24 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         }
 
         KeyCode::Char(' ') if app.active_tab != ResourceType::Secret => {
-            if let Some(i) = app.table_state.selected()
-                && !app.selected_indices.remove(&i)
+            if let Some(name) = app.get_selected_resource().map(|r| r.name().to_owned())
+                && !app.selected_names.remove(&name)
             {
-                app.selected_indices.insert(i);
+                app.selected_names.insert(name);
             }
         }
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.selected_indices.len() == app.filtered_items.len() {
-                app.selected_indices.clear();
+        KeyCode::Char('a')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && app.active_tab != ResourceType::Secret =>
+        {
+            if app.selected_names.len() == app.filtered_items.len() {
+                app.selected_names.clear();
             } else {
-                app.selected_indices = (0..app.filtered_items.len()).collect();
+                app.selected_names = app
+                    .filtered_items
+                    .iter()
+                    .map(|r| r.name().to_owned())
+                    .collect();
             }
         }
 
@@ -662,7 +673,11 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('p') if app.active_tab == ResourceType::Pod => {
-            if app.get_selected_resource().is_some() {
+            if let Some(pod) = app.get_selected_resource() {
+                app.port_forward_target = Some(PortForwardTarget {
+                    pod_name: pod.name().to_owned(),
+                    namespace: app.current_namespace.clone(),
+                });
                 app.port_forward_input.clear();
                 app.mode = AppMode::PortForwardInput;
             } else {
@@ -683,13 +698,10 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         {
             let names = collect_selected_names(app);
             if !names.is_empty() {
-                let count = names.len();
-                let kind = match app.active_tab {
-                    ResourceType::Pod => "pod(s)",
-                    ResourceType::Deployment => "deployment(s)",
-                    _ => "resource(s)",
-                };
-                app.pending_action = Some(PendingAction::DeleteResource { count, kind, names });
+                app.pending_action = Some(PendingAction::DeleteResource {
+                    resource: app.active_tab,
+                    names,
+                });
                 app.mode = AppMode::Confirm;
             } else {
                 app.set_error("No resource selected".to_string());
@@ -697,7 +709,9 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
         }
 
         KeyCode::Char('S') if app.active_tab == ResourceType::Deployment => {
-            if app.get_selected_resource().is_some() {
+            let names = collect_selected_names(app);
+            if !names.is_empty() {
+                app.scale_targets = names;
                 app.scale_input.clear();
                 app.mode = AppMode::ScaleInput;
             } else {
@@ -729,28 +743,18 @@ fn handle_global_input(app: &mut App, key: KeyEvent) {
                 let ctx = app.current_context.clone();
                 let tx = app.event_tx.clone();
                 tokio::spawn(async move {
-                    match tokio::process::Command::new("kubectl")
-                        .args(["describe", kind, &name, "-n", &ns, "--context", &ctx])
-                        .output()
-                        .await
+                    let event = match crate::k8s::kubectl::capture(
+                        &["describe", kind, &name, "-n", &ns, "--context", &ctx],
+                        crate::k8s::kubectl::DESCRIBE_TIMEOUT,
+                    )
+                    .await
                     {
-                        Ok(output) if output.status.success() => {
-                            let text = String::from_utf8_lossy(&output.stdout);
-                            let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-                            let _ = tx.send(KubeResourceEvent::DescribeReady(lines));
-                        }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            let _ = tx.send(KubeResourceEvent::Error(format!(
-                                "Describe failed: {}",
-                                stderr.trim()
-                            )));
-                        }
-                        Err(e) => {
-                            let _ =
-                                tx.send(KubeResourceEvent::Error(format!("Describe failed: {e}")));
-                        }
-                    }
+                        Ok(text) => KubeResourceEvent::DescribeReady(
+                            text.lines().map(|l| l.to_string()).collect(),
+                        ),
+                        Err(e) => KubeResourceEvent::Error(format!("Describe failed: {e}")),
+                    };
+                    let _ = tx.send(event);
                 });
             } else {
                 app.set_error("No resource selected".to_string());
@@ -1015,7 +1019,7 @@ fn handle_shell_input(app: &mut App, key: KeyEvent) {
     use std::io::Write;
 
     if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.shell_session = None;
+        app.close_shell();
         app.mode = AppMode::List;
         return;
     }
@@ -1028,13 +1032,25 @@ fn handle_shell_input(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn control_byte(c: char) -> Option<u8> {
+    match c {
+        'a'..='z' => Some(c as u8 - b'a' + 1),
+        'A'..='Z' => Some(c as u8 - b'A' + 1),
+        ' ' | '@' => Some(0),
+        '4'..='7' => Some(c as u8 - b'4' + 0x1c),
+        '[' | '\\' | ']' | '^' | '_' => Some(c as u8 - 0x40),
+        '?' => Some(0x7f),
+        _ => None,
+    }
+}
+
 fn key_to_pty_bytes(key: KeyEvent) -> Vec<u8> {
     let has_alt = key.modifiers.contains(KeyModifiers::ALT);
 
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && let KeyCode::Char(c) = key.code
+        && let Some(code) = control_byte(c)
     {
-        let code = (c as u8).wrapping_sub(b'a').wrapping_add(1);
         if has_alt {
             return vec![0x1b, code];
         }
@@ -1075,6 +1091,7 @@ fn key_to_pty_bytes(key: KeyEvent) -> Vec<u8> {
 fn handle_scale_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
+            app.scale_targets.clear();
             app.mode = AppMode::List;
         }
         KeyCode::Enter => {
@@ -1085,15 +1102,21 @@ fn handle_scale_input(app: &mut App, key: KeyEvent) {
             if let Ok(replicas) = app.scale_input.parse::<u32>() {
                 if replicas > 1000 {
                     app.set_error("Replica count must be <= 1000".to_string());
-                } else if let Some(res) = app.get_selected_resource() {
-                    let name = res.name().to_owned();
-                    app.pending_action = Some(PendingAction::ScaleDeployment { name, replicas });
-                    app.mode = AppMode::Confirm;
-                    return;
+                } else {
+                    let names = std::mem::take(&mut app.scale_targets);
+                    if names.is_empty() {
+                        app.set_error("No deployment selected".to_string());
+                    } else {
+                        app.pending_action =
+                            Some(PendingAction::ScaleDeployment { names, replicas });
+                        app.mode = AppMode::Confirm;
+                        return;
+                    }
                 }
             } else {
                 app.set_error("Invalid number".to_string());
             }
+            app.scale_targets.clear();
             app.mode = AppMode::List;
         }
         KeyCode::Backspace => {
@@ -1111,56 +1134,33 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             if let Some(action) = app.pending_action.take() {
                 match action {
-                    PendingAction::DeleteResource { .. } => {
-                        let indices: Vec<usize> = if app.selected_indices.is_empty() {
-                            app.table_state.selected().into_iter().collect()
-                        } else {
-                            let mut v: Vec<usize> = app.selected_indices.iter().copied().collect();
-                            v.sort_unstable();
-                            v
-                        };
-                        for idx in indices {
-                            if let Some(item) = app.filtered_items.get(idx).cloned() {
-                                let client = app.client.clone();
-                                let ns = app.current_namespace.clone();
-                                let tx = app.event_tx.clone();
-                                match item {
-                                    KubeResource::Pod(p) => {
-                                        let name = p.metadata.name.clone().unwrap_or_default();
-                                        tokio::spawn(async move {
-                                            let result =
-                                                crate::k8s::actions::delete_pod(client, &ns, &name)
-                                                    .await;
-                                            let _ = tx.send(match result {
-                                                Ok(()) => KubeResourceEvent::Success(format!(
-                                                    "Pod '{name}' deleted"
-                                                )),
-                                                Err(e) => KubeResourceEvent::Error(format!(
-                                                    "Delete '{name}' failed: {e}"
-                                                )),
-                                            });
-                                        });
-                                    }
-                                    KubeResource::Deployment(d) => {
-                                        let name = d.metadata.name.clone().unwrap_or_default();
-                                        tokio::spawn(async move {
-                                            let result = crate::k8s::actions::delete_deployment(
-                                                client, &ns, &name,
-                                            )
-                                            .await;
-                                            let _ = tx.send(match result {
-                                                Ok(()) => KubeResourceEvent::Success(format!(
-                                                    "Deployment '{name}' deleted"
-                                                )),
-                                                Err(e) => KubeResourceEvent::Error(format!(
-                                                    "Delete '{name}' failed: {e}"
-                                                )),
-                                            });
-                                        });
-                                    }
-                                    KubeResource::Secret(_) => {}
-                                }
-                            }
+                    PendingAction::DeleteResource { resource, names } => {
+                        for name in names {
+                            let client = app.client.clone();
+                            let ns = app.current_namespace.clone();
+                            let tx = app.event_tx.clone();
+                            tokio::spawn(async move {
+                                let (result, label) = match resource {
+                                    ResourceType::Pod => (
+                                        crate::k8s::actions::delete_pod(client, &ns, &name).await,
+                                        "Pod",
+                                    ),
+                                    ResourceType::Deployment => (
+                                        crate::k8s::actions::delete_deployment(client, &ns, &name)
+                                            .await,
+                                        "Deployment",
+                                    ),
+                                    ResourceType::Secret => return,
+                                };
+                                let _ = tx.send(match result {
+                                    Ok(()) => KubeResourceEvent::Success(format!(
+                                        "{label} '{name}' deleted"
+                                    )),
+                                    Err(e) => KubeResourceEvent::Error(format!(
+                                        "Delete '{name}' failed: {e}"
+                                    )),
+                                });
+                            });
                         }
                     }
                     PendingAction::RestartDeployment { names } => {
@@ -1182,23 +1182,26 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                             });
                         }
                     }
-                    PendingAction::ScaleDeployment { name, replicas } => {
-                        let client = app.client.clone();
-                        let ns = app.current_namespace.clone();
-                        let tx = app.event_tx.clone();
-                        tokio::spawn(async move {
-                            let result =
-                                crate::k8s::actions::scale_deployment(client, &ns, &name, replicas)
-                                    .await;
-                            let _ = tx.send(match result {
-                                Ok(()) => KubeResourceEvent::Success(format!(
-                                    "'{name}' scaled to {replicas} replicas"
-                                )),
-                                Err(e) => {
-                                    KubeResourceEvent::Error(format!("Scale '{name}' failed: {e}"))
-                                }
+                    PendingAction::ScaleDeployment { names, replicas } => {
+                        for name in names {
+                            let client = app.client.clone();
+                            let ns = app.current_namespace.clone();
+                            let tx = app.event_tx.clone();
+                            tokio::spawn(async move {
+                                let result = crate::k8s::actions::scale_deployment(
+                                    client, &ns, &name, replicas,
+                                )
+                                .await;
+                                let _ = tx.send(match result {
+                                    Ok(()) => KubeResourceEvent::Success(format!(
+                                        "'{name}' scaled to {replicas} replicas"
+                                    )),
+                                    Err(e) => KubeResourceEvent::Error(format!(
+                                        "Scale '{name}' failed: {e}"
+                                    )),
+                                });
                             });
-                        });
+                        }
                     }
                     PendingAction::PortForward {
                         pod_name,
@@ -1209,12 +1212,12 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                         app.start_port_forward(&pod_name, &namespace, local_port, remote_port);
                     }
                 }
-                app.selected_indices.clear();
+                app.selected_names.clear();
             }
             app.mode = AppMode::List;
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            app.selected_indices.clear();
+            app.selected_names.clear();
             app.pending_action = None;
             app.mode = AppMode::List;
         }
@@ -1284,6 +1287,12 @@ mod tests {
         let mut pod = Pod::default();
         pod.metadata.name = Some(name.to_string());
         KubeResource::Pod(Arc::new(pod))
+    }
+
+    fn make_secret(name: &str) -> KubeResource {
+        let mut secret = k8s_openapi::api::core::v1::Secret::default();
+        secret.metadata.name = Some(name.to_string());
+        KubeResource::Secret(Arc::new(secret))
     }
 
     fn make_deployment(name: &str) -> KubeResource {
@@ -1792,8 +1801,7 @@ mod tests {
         let mut app = App::new_test();
         app.mode = AppMode::Confirm;
         app.pending_action = Some(PendingAction::DeleteResource {
-            count: 1,
-            kind: "pod(s)",
+            resource: ResourceType::Pod,
             names: vec!["test".into()],
         });
 
@@ -1807,8 +1815,7 @@ mod tests {
         let mut app = App::new_test();
         app.mode = AppMode::Confirm;
         app.pending_action = Some(PendingAction::DeleteResource {
-            count: 1,
-            kind: "pod(s)",
+            resource: ResourceType::Pod,
             names: vec!["test".into()],
         });
 
@@ -2407,8 +2414,8 @@ mod tests {
             make_deployment("api"),
             make_deployment("worker"),
         ];
-        app.selected_indices.insert(0);
-        app.selected_indices.insert(2);
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("worker".into());
         handle_input(&mut app, key(KeyCode::Char('r')));
         assert_eq!(app.mode, AppMode::Confirm);
         assert_eq!(
@@ -2417,6 +2424,301 @@ mod tests {
                 names: vec!["web".into(), "worker".into()]
             })
         );
+    }
+
+    #[tokio::test]
+    async fn scale_single_deployment() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web")];
+        app.table_state.select(Some(0));
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        assert_eq!(app.mode, AppMode::ScaleInput);
+        handle_input(&mut app, key(KeyCode::Char('3')));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::ScaleDeployment {
+                names: vec!["web".into()],
+                replicas: 3
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn scale_multi_select_deployments() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![
+            make_deployment("web"),
+            make_deployment("api"),
+            make_deployment("worker"),
+        ];
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("worker".into());
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        assert_eq!(app.mode, AppMode::ScaleInput);
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::ScaleDeployment {
+                names: vec!["web".into(), "worker".into()],
+                replicas: 0
+            })
+        );
+    }
+
+    async fn drain_action_messages(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
+        count: usize,
+    ) -> Vec<String> {
+        let mut msgs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("action task did not report")
+                .expect("event channel closed");
+            msgs.push(match event {
+                KubeResourceEvent::Success(m) | KubeResourceEvent::Error(m) => m,
+                other => panic!("unexpected event: {other:?}"),
+            });
+        }
+        msgs
+    }
+
+    #[tokio::test]
+    async fn delete_targets_survive_watcher_refresh_before_confirm() {
+        let (mut app, mut rx) = App::new_test_with_rx();
+        app.active_tab = ResourceType::Deployment;
+        app.items = vec![
+            make_deployment("web"),
+            make_deployment("api"),
+            make_deployment("worker"),
+        ];
+        app.update_filter();
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("worker".into());
+        app.table_state.select(Some(1));
+
+        handle_input(&mut app, key(KeyCode::Char('D')));
+        assert_eq!(app.mode, AppMode::Confirm);
+        app.items = vec![make_deployment("web"), make_deployment("api")];
+        app.update_filter();
+        assert_eq!(app.selected_names.len(), 1);
+        handle_input(&mut app, key(KeyCode::Char('y')));
+
+        let msgs = drain_action_messages(&mut rx, 2).await;
+        assert!(msgs.iter().any(|m| m.contains("'web'")), "{msgs:?}");
+        assert!(msgs.iter().any(|m| m.contains("'worker'")), "{msgs:?}");
+        assert!(!msgs.iter().any(|m| m.contains("'api'")), "{msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_uses_confirmed_names_not_cursor() {
+        let (mut app, mut rx) = App::new_test_with_rx();
+        app.active_tab = ResourceType::Pod;
+        app.items = vec![make_pod("web"), make_pod("api")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('D')));
+        app.items = vec![make_pod("api")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+        handle_input(&mut app, key(KeyCode::Char('y')));
+
+        let msgs = drain_action_messages(&mut rx, 1).await;
+        assert!(msgs[0].contains("'web'"), "{msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_quits_from_a_text_input_instead_of_typing_c() {
+        for mode in [
+            AppMode::FilterInput,
+            AppMode::LogSearchInput,
+            AppMode::NamespaceSelect,
+        ] {
+            let mut app = App::new_test();
+            app.mode = mode;
+            app.namespace_typing = true;
+
+            handle_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            );
+
+            assert!(app.should_quit, "{mode:?} did not quit");
+            assert!(
+                app.filter_query.is_empty(),
+                "{mode:?} typed into the filter"
+            );
+            assert!(
+                app.log_search_input.is_empty(),
+                "{mode:?} typed into the search"
+            );
+            assert!(
+                app.namespace_input.is_empty(),
+                "{mode:?} typed into the namespace"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_still_reaches_the_pty() {
+        let mut app = App::new_test();
+        app.mode = AppMode::ShellView;
+
+        handle_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn control_bytes_cover_the_non_letter_keys() {
+        assert_eq!(control_byte('a'), Some(0x01));
+        assert_eq!(control_byte('A'), Some(0x01));
+        assert_eq!(control_byte(' '), Some(0x00));
+        assert_eq!(control_byte('@'), Some(0x00));
+        assert_eq!(control_byte('['), Some(0x1b));
+        assert_eq!(control_byte('4'), Some(0x1c));
+        assert_eq!(control_byte('5'), Some(0x1d));
+        assert_eq!(control_byte('7'), Some(0x1f));
+        assert_eq!(control_byte(']'), Some(0x1d));
+        assert_eq!(control_byte('_'), Some(0x1f));
+        assert_eq!(control_byte('?'), Some(0x7f));
+        assert_eq!(control_byte('é'), None);
+    }
+
+    #[test]
+    fn crossterm_reports_ctrl_bracket_as_a_digit() {
+        assert_eq!(
+            key_to_pty_bytes(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL)),
+            vec![0x1d],
+            "crossterm's legacy decoder maps 0x1C..=0x1F to '4'..='7'"
+        );
+        assert_eq!(
+            key_to_pty_bytes(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL)),
+            vec![0x1c]
+        );
+    }
+
+    #[test]
+    fn unmapped_control_chars_are_sent_literally_not_as_garbage() {
+        let bytes = key_to_pty_bytes(KeyEvent::new(KeyCode::Char('é'), KeyModifiers::CONTROL));
+        assert_eq!(bytes, "é".as_bytes());
+    }
+
+    #[tokio::test]
+    async fn ctrl_a_is_ignored_on_secrets_tab() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Secret;
+        app.items = vec![make_secret("db-creds"), make_secret("tls")];
+        app.update_filter();
+
+        handle_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+
+        assert!(app.selected_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scale_uses_the_captured_target_not_a_moved_cursor() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.items = vec![make_deployment("web"), make_deployment("api")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        handle_input(&mut app, key(KeyCode::Char('2')));
+        app.items = vec![make_deployment("api"), make_deployment("web")];
+        app.update_filter();
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::ScaleDeployment {
+                names: vec!["web".into()],
+                replicas: 2
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn scale_opens_without_cursor_when_multi_selected() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
+        app.selected_names.insert("api".into());
+        app.table_state.select(None);
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        assert_eq!(app.mode, AppMode::ScaleInput);
+    }
+
+    #[tokio::test]
+    async fn scale_esc_keeps_multi_selection() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("api".into());
+
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        handle_input(&mut app, key(KeyCode::Esc));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert_eq!(app.selected_names.len(), 2);
+        assert!(app.scale_targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scale_enter_without_targets_errors() {
+        let mut app = App::new_test();
+        app.mode = AppMode::ScaleInput;
+        app.active_tab = ResourceType::Deployment;
+        app.scale_targets.clear();
+        app.scale_input = "2".to_string();
+
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.pending_action.is_none());
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn scale_no_deployment_selected() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![];
+        app.table_state.select(None);
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn scale_confirm_clears_multi_selection() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Deployment;
+        app.filtered_items = vec![make_deployment("web"), make_deployment("api")];
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("api".into());
+        handle_input(&mut app, key(KeyCode::Char('S')));
+        handle_input(&mut app, key(KeyCode::Char('2')));
+        handle_input(&mut app, key(KeyCode::Enter));
+        handle_input(&mut app, key(KeyCode::Char('y')));
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.selected_names.is_empty());
+        assert!(app.pending_action.is_none());
     }
 
     #[tokio::test]
@@ -2443,14 +2745,14 @@ mod tests {
     async fn enter_on_deployment_switches_to_pods_with_filter() {
         let mut app = App::new_test();
         app.active_tab = ResourceType::Deployment;
-        app.filtered_items = vec![make_deployment("catalog-backend-appliances")];
+        app.filtered_items = vec![make_deployment("api-gateway-worker")];
         app.table_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Enter));
         assert_eq!(app.active_tab, ResourceType::Pod);
-        assert_eq!(app.filter_query, "catalog-backend-appliances");
+        assert_eq!(app.filter_query, "api-gateway-worker");
         assert_eq!(app.table_state.selected(), None);
-        assert!(app.selected_indices.is_empty());
+        assert!(app.selected_names.is_empty());
     }
 
     #[tokio::test]
@@ -2725,6 +3027,140 @@ mod tests {
         assert_eq!(app.mode, AppMode::List);
         assert_eq!(app.port_forwards.len(), 1);
         assert_eq!(app.port_forwards[0].local_port, 9090);
+    }
+
+    #[tokio::test]
+    async fn port_forward_target_survives_watcher_refresh_mid_input() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.items = vec![make_pod("web"), make_pod("api")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        for c in "8080:80".chars() {
+            handle_input(&mut app, key(KeyCode::Char(c)));
+        }
+        app.items = vec![make_pod("api"), make_pod("web")];
+        app.update_filter();
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::PortForward {
+                pod_name: "web".into(),
+                namespace: "default".into(),
+                local_port: 8080,
+                remote_port: 80
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn port_forward_target_survives_pod_disappearing() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.items = vec![make_pod("web")];
+        app.update_filter();
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        handle_input(&mut app, key(KeyCode::Char('8')));
+        handle_input(&mut app, key(KeyCode::Char('0')));
+        app.items.clear();
+        app.update_filter();
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.pending_action,
+            Some(PendingAction::PortForward {
+                pod_name: "web".into(),
+                namespace: "default".into(),
+                local_port: 80,
+                remote_port: 80
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn port_forward_busy_port_keeps_target_and_popup() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("web")];
+        app.table_state.select(Some(0));
+        app.port_forwards.push(crate::app::ActivePortForward {
+            id: 1,
+            pod_name: "other".into(),
+            namespace: "default".into(),
+            local_port: 8080,
+            remote_port: 80,
+            abort_handle: tokio::spawn(async {}).abort_handle(),
+            started_at: std::time::Instant::now(),
+        });
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        for c in "8080".chars() {
+            handle_input(&mut app, key(KeyCode::Char(c)));
+        }
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::PortForwardInput);
+        assert!(app.last_error.is_some());
+        assert_eq!(
+            app.port_forward_target,
+            Some(PortForwardTarget {
+                pod_name: "web".into(),
+                namespace: "default".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn port_forward_esc_clears_target() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("web")];
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        assert!(app.port_forward_target.is_some());
+        handle_input(&mut app, key(KeyCode::Esc));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.port_forward_target.is_none());
+    }
+
+    #[tokio::test]
+    async fn port_forward_enter_without_target_errors() {
+        let mut app = App::new_test();
+        app.mode = AppMode::PortForwardInput;
+        app.port_forward_target = None;
+        app.port_forward_input = "8080:80".to_string();
+
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.pending_action.is_none());
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn port_forward_invalid_format_clears_target() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        app.filtered_items = vec![make_pod("web")];
+        app.table_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('p')));
+        handle_input(&mut app, key(KeyCode::Char('8')));
+        handle_input(&mut app, key(KeyCode::Char(':')));
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.mode, AppMode::List);
+        assert!(app.port_forward_target.is_none());
+        assert!(app.last_error.is_some());
     }
 
     #[tokio::test]

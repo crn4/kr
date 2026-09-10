@@ -62,6 +62,17 @@ impl ResourceType {
         }
     }
 
+    pub fn noun(self, count: usize) -> &'static str {
+        match (self, count) {
+            (Self::Pod, 1) => "pod",
+            (Self::Pod, _) => "pods",
+            (Self::Deployment, 1) => "deployment",
+            (Self::Deployment, _) => "deployments",
+            (Self::Secret, 1) => "secret",
+            (Self::Secret, _) => "secrets",
+        }
+    }
+
     pub fn sort_column_count(self) -> usize {
         match self {
             Self::Pod => 5,
@@ -102,10 +113,11 @@ pub enum KubeResourceEvent {
     Error(String),
     Success(String),
     WatcherForbidden(String),
-    Log(String),
-    LogHistory(u64, Vec<String>),
-    ShellOutput(Vec<u8>),
-    ShellExited,
+    Log(u64, String),
+    LogStreamEnded(u64, Option<String>),
+    LogHistory(u64, Result<Vec<String>, String>),
+    ShellOutput(u64, Vec<u8>),
+    ShellExited(u64),
     DescribeReady(Vec<String>),
     NamespacesLoaded {
         context: String,
@@ -147,17 +159,22 @@ pub enum ContextEntry<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortForwardTarget {
+    pub pod_name: String,
+    pub namespace: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAction {
     DeleteResource {
-        count: usize,
-        kind: &'static str,
+        resource: ResourceType,
         names: Vec<String>,
     },
     RestartDeployment {
         names: Vec<String>,
     },
     ScaleDeployment {
-        name: String,
+        names: Vec<String>,
         replicas: u32,
     },
     PortForward {
@@ -168,39 +185,52 @@ pub enum PendingAction {
     },
 }
 
+const MAX_LISTED_NAMES: usize = 20;
+
+pub(crate) fn join_names(names: &[String]) -> String {
+    if names.len() <= MAX_LISTED_NAMES {
+        return names.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        names[..MAX_LISTED_NAMES].join(", "),
+        names.len() - MAX_LISTED_NAMES
+    )
+}
+
 impl PendingAction {
     pub fn message(&self) -> String {
         match self {
-            Self::DeleteResource { count, kind, names } => {
-                if *count == 1 {
-                    format!(
-                        "Delete {} '{}'?",
-                        kind,
-                        names.first().map(|s| s.as_str()).unwrap_or("?")
-                    )
+            Self::DeleteResource { resource, names } => match names.as_slice() {
+                [name] => format!("Delete {} '{name}'?", resource.noun(1)),
+                _ => format!(
+                    "Delete {} {}?\n{}",
+                    names.len(),
+                    resource.noun(names.len()),
+                    join_names(names)
+                ),
+            },
+            Self::RestartDeployment { names } => match names.as_slice() {
+                [name] => format!("Rollout restart '{name}'?"),
+                _ => format!(
+                    "Rollout restart {} deployments?\n{}",
+                    names.len(),
+                    join_names(names)
+                ),
+            },
+            Self::ScaleDeployment { names, replicas } => {
+                let warning = if *replicas == 0 {
+                    "\nThis will stop all pods."
                 } else {
-                    format!("Delete {} {}?\n{}", count, kind, names.join(", "))
-                }
-            }
-            Self::RestartDeployment { names } => {
-                if names.len() == 1 {
-                    format!(
-                        "Rollout restart '{}'?",
-                        names.first().map(|s| s.as_str()).unwrap_or("?")
-                    )
-                } else {
-                    format!(
-                        "Rollout restart {} deployments?\n{}",
+                    ""
+                };
+                match names.as_slice() {
+                    [name] => format!("Scale '{name}' to {replicas} replicas?{warning}"),
+                    _ => format!(
+                        "Scale {} deployments to {replicas} replicas?\n{}{warning}",
                         names.len(),
-                        names.join(", ")
-                    )
-                }
-            }
-            Self::ScaleDeployment { name, replicas } => {
-                if *replicas == 0 {
-                    format!("Scale '{}' to 0 replicas?\nThis will stop all pods.", name)
-                } else {
-                    format!("Scale '{}' to {} replicas?", name, replicas)
+                        join_names(names)
+                    ),
                 }
             }
             Self::PortForward {
@@ -270,6 +300,92 @@ mod tests {
         let pod = Pod::default();
         let res = KubeResource::Pod(Arc::new(pod));
         assert_eq!(res.name(), "");
+    }
+
+    #[test]
+    fn a_long_name_list_is_capped() {
+        let names: Vec<String> = (0..50).map(|i| format!("pod-{i}")).collect();
+        let joined = join_names(&names);
+        assert!(joined.starts_with("pod-0, pod-1,"));
+        assert!(joined.ends_with(", and 30 more"), "{joined}");
+        assert_eq!(joined.matches("pod-").count(), 20);
+    }
+
+    #[test]
+    fn a_short_name_list_is_listed_in_full() {
+        let names: Vec<String> = (0..3).map(|i| format!("pod-{i}")).collect();
+        assert_eq!(join_names(&names), "pod-0, pod-1, pod-2");
+    }
+
+    #[test]
+    fn delete_message_single_uses_singular_noun() {
+        let msg = PendingAction::DeleteResource {
+            resource: ResourceType::Pod,
+            names: vec!["nginx".into()],
+        }
+        .message();
+        assert_eq!(msg, "Delete pod 'nginx'?");
+    }
+
+    #[test]
+    fn delete_message_multi_uses_plural_noun_and_lists() {
+        let msg = PendingAction::DeleteResource {
+            resource: ResourceType::Deployment,
+            names: vec!["web".into(), "api".into()],
+        }
+        .message();
+        assert_eq!(msg, "Delete 2 deployments?\nweb, api");
+    }
+
+    #[test]
+    fn resource_type_noun_pluralizes() {
+        assert_eq!(ResourceType::Pod.noun(1), "pod");
+        assert_eq!(ResourceType::Pod.noun(0), "pods");
+        assert_eq!(ResourceType::Secret.noun(3), "secrets");
+    }
+
+    #[test]
+    fn scale_message_single() {
+        let msg = PendingAction::ScaleDeployment {
+            names: vec!["web".into()],
+            replicas: 3,
+        }
+        .message();
+        assert_eq!(msg, "Scale 'web' to 3 replicas?");
+    }
+
+    #[test]
+    fn scale_message_single_zero_warns() {
+        let msg = PendingAction::ScaleDeployment {
+            names: vec!["web".into()],
+            replicas: 0,
+        }
+        .message();
+        assert!(msg.starts_with("Scale 'web' to 0 replicas?"));
+        assert!(msg.contains("This will stop all pods."));
+    }
+
+    #[test]
+    fn scale_message_multi_lists_names() {
+        let msg = PendingAction::ScaleDeployment {
+            names: vec!["web".into(), "api".into()],
+            replicas: 2,
+        }
+        .message();
+        assert_eq!(msg, "Scale 2 deployments to 2 replicas?\nweb, api");
+    }
+
+    #[test]
+    fn scale_message_multi_zero_warns_and_lists() {
+        let msg = PendingAction::ScaleDeployment {
+            names: vec!["web".into(), "api".into()],
+            replicas: 0,
+        }
+        .message();
+        assert_eq!(
+            msg,
+            "Scale 2 deployments to 0 replicas?\nweb, api\nThis will stop all pods."
+        );
     }
 
     #[test]

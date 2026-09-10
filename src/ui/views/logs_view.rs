@@ -17,23 +17,15 @@ fn highlight_line<'a>(text: &'a str, needle_lower: &str) -> Line<'a> {
     let needle_bytes = needle_lower.as_bytes();
     let mut spans = Vec::with_capacity(4);
     let mut start = 0;
-    while start + needle_len <= text_bytes.len() {
-        if let Some(pos) = text_bytes[start..]
-            .windows(needle_len)
-            .position(|w| w.eq_ignore_ascii_case(needle_bytes))
-        {
-            let abs = start + pos;
-            if abs > start {
-                spans.push(Span::raw(&text[start..abs]));
-            }
-            spans.push(Span::styled(
-                &text[abs..abs + needle_len],
-                STYLE_SEARCH_MATCH,
-            ));
-            start = abs + needle_len;
-        } else {
-            break;
+    while let Some(abs) = crate::app::find_ascii_ci(text_bytes, needle_bytes, start) {
+        if abs > start {
+            spans.push(Span::raw(&text[start..abs]));
         }
+        spans.push(Span::styled(
+            &text[abs..abs + needle_len],
+            STYLE_SEARCH_MATCH,
+        ));
+        start = abs + needle_len;
     }
     if start < text.len() {
         spans.push(Span::raw(&text[start..]));
@@ -45,17 +37,25 @@ fn highlight_line<'a>(text: &'a str, needle_lower: &str) -> Line<'a> {
     }
 }
 
+pub(crate) fn mode_label(scroll_offset: Option<usize>, stream_ended: bool) -> &'static str {
+    if stream_ended {
+        "ENDED"
+    } else if scroll_offset.is_some() {
+        "PAUSED"
+    } else {
+        "FOLLOWING"
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let total_lines = app.log_buffer.len();
     let visible_height = area.height.saturating_sub(2) as usize;
 
-    let (scroll_offset, mode_label) = match app.log_scroll_offset {
-        None => (total_lines.saturating_sub(visible_height), "FOLLOWING"),
-        Some(offset) => (
-            offset.min(total_lines.saturating_sub(visible_height)),
-            "PAUSED",
-        ),
+    let scroll_offset = match app.log_scroll_offset {
+        None => total_lines.saturating_sub(visible_height),
+        Some(offset) => offset.min(total_lines.saturating_sub(visible_height)),
     };
+    let mode_label = mode_label(app.log_scroll_offset, app.log_stream_ended);
 
     let temp;
     let query_lower = if app.mode == AppMode::LogSearchInput {
@@ -114,6 +114,32 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multibyte_needle_slices_on_char_boundaries() {
+        for (text, needle) in [
+            ("日本語x", "本語"),
+            ("café au lait", "é"),
+            ("say \u{3c9}mega now", "\u{3c9}mega"),
+            ("日b", "b"),
+        ] {
+            let line = highlight_line(text, needle);
+            let rebuilt: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(rebuilt, text, "{text:?} / {needle:?} lost content");
+            assert!(
+                line.spans.iter().any(|s| s.style == STYLE_SEARCH_MATCH),
+                "{text:?} / {needle:?} did not highlight"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_label_reports_a_dead_stream_instead_of_following() {
+        assert_eq!(mode_label(None, false), "FOLLOWING");
+        assert_eq!(mode_label(Some(3), false), "PAUSED");
+        assert_eq!(mode_label(None, true), "ENDED");
+        assert_eq!(mode_label(Some(3), true), "ENDED");
+    }
 
     fn span_texts<'a>(line: &'a Line<'a>) -> Vec<&'a str> {
         line.spans.iter().map(|s| s.content.as_ref()).collect()

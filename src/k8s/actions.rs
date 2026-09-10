@@ -13,6 +13,7 @@ pub fn stream_pod_logs(
     pod_name: &str,
     tx: UnboundedSender<KubeResourceEvent>,
     tail_lines: i64,
+    generation: u64,
 ) -> tokio::task::AbortHandle {
     let namespace = namespace.to_owned();
     let pod_name = pod_name.to_owned();
@@ -24,24 +25,29 @@ pub fn stream_pod_logs(
             ..Default::default()
         };
 
-        match pods.log_stream(&pod_name, &lp).await {
+        let ended = match pods.log_stream(&pod_name, &lp).await {
             Ok(stream) => {
                 let mut lines = stream.lines();
-                while let Some(Ok(line)) = lines.next().await {
-                    if tx.send(KubeResourceEvent::Log(line)).is_err() {
-                        break;
+                let mut failure = None;
+                loop {
+                    match lines.next().await {
+                        Some(Ok(line)) => {
+                            if tx.send(KubeResourceEvent::Log(generation, line)).is_err() {
+                                return;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            failure = Some(format!("Log stream ended: {e}"));
+                            break;
+                        }
+                        None => break,
                     }
                 }
+                failure
             }
-            Err(e) => {
-                if tx
-                    .send(KubeResourceEvent::Error(format!("Log error: {e}")))
-                    .is_err()
-                {
-                    tracing::warn!("Failed to send log error event");
-                }
-            }
-        }
+            Err(e) => Some(format!("Log error: {e}")),
+        };
+        let _ = tx.send(KubeResourceEvent::LogStreamEnded(generation, ended));
     });
     handle.abort_handle()
 }
@@ -176,13 +182,28 @@ pub fn fetch_log_history(
             Ok(stream) => {
                 let mut lines = Vec::new();
                 let mut reader = stream.lines();
-                while let Some(Ok(line)) = reader.next().await {
-                    lines.push(line);
+                let mut failure = None;
+                loop {
+                    match reader.next().await {
+                        Some(Ok(line)) => lines.push(line),
+                        Some(Err(e)) => {
+                            failure = Some(format!("Log history error: {e}"));
+                            break;
+                        }
+                        None => break,
+                    }
                 }
-                let _ = tx.send(KubeResourceEvent::LogHistory(generation, lines));
+                let result = match failure {
+                    Some(message) => Err(message),
+                    None => Ok(lines),
+                };
+                let _ = tx.send(KubeResourceEvent::LogHistory(generation, result));
             }
             Err(e) => {
-                let _ = tx.send(KubeResourceEvent::Error(format!("Log history error: {e}")));
+                let _ = tx.send(KubeResourceEvent::LogHistory(
+                    generation,
+                    Err(format!("Log history error: {e}")),
+                ));
             }
         }
     });

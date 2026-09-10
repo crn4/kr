@@ -1,6 +1,6 @@
 use crate::models::{
     AppMode, ContextEntry, KubeResource, KubeResourceEvent, NamespaceOrigin, PendingAction,
-    ResourceType, SortDirection,
+    PortForwardTarget, ResourceType, SortDirection,
 };
 use crate::state::AppState;
 use k8s_openapi::api::{
@@ -17,10 +17,33 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::AbortHandle;
 
+type ShellChild = Arc<std::sync::Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>;
+
+fn scaled_to_80_percent(value: u16) -> u16 {
+    (u32::from(value) * 80 / 100) as u16
+}
+
+pub fn clear_clipboard_now() {
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let _ = clipboard.set_text(String::new());
+    }
+}
+
 pub struct ShellSession {
     pub writer: Box<dyn std::io::Write + Send>,
     pub parser: vt100::Parser,
+    child: ShellChild,
     _master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
+impl Drop for ShellSession {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.child.lock()
+            && let Some(child) = slot.as_mut()
+        {
+            let _ = child.clone_killer().kill();
+        }
+    }
 }
 
 pub struct ActivePortForward {
@@ -37,18 +60,36 @@ pub(crate) const MAX_LOG_LINES: usize = 10_000;
 pub(crate) const LOG_CHROME_LINES: usize = 6;
 pub(crate) const DEFAULT_NAMESPACE: &str = "default";
 
+pub(crate) fn find_ascii_ci(haystack: &[u8], needle_lower: &[u8], from: usize) -> Option<usize> {
+    let (&first, rest) = needle_lower.split_first()?;
+    let lower = first.to_ascii_lowercase();
+    let upper = first.to_ascii_uppercase();
+    let last_start = haystack.len().checked_sub(needle_lower.len())?;
+
+    let mut at = from;
+    while at <= last_start {
+        let offset = haystack[at..=last_start]
+            .iter()
+            .position(|&b| b == lower || b == upper)?;
+        let candidate = at + offset;
+        if haystack[candidate + 1..candidate + needle_lower.len()].eq_ignore_ascii_case(rest) {
+            return Some(candidate);
+        }
+        at = candidate + 1;
+    }
+    None
+}
+
 pub(crate) fn contains_ascii_ci(haystack: &str, needle_lower: &str) -> bool {
     if needle_lower.is_empty() {
         return true;
     }
-    haystack
-        .as_bytes()
-        .windows(needle_lower.len())
-        .any(|w| w.eq_ignore_ascii_case(needle_lower.as_bytes()))
+    find_ascii_ci(haystack.as_bytes(), needle_lower.as_bytes(), 0).is_some()
 }
 
 pub struct App {
     pub client: Client,
+    pub log_stream_client: Client,
     pub current_namespace: String,
 
     pub mode: AppMode,
@@ -70,7 +111,7 @@ pub struct App {
     pub filtered_items: Vec<KubeResource>,
     pub table_state: TableState,
     pub filter_query: String,
-    pub selected_indices: HashSet<usize>,
+    pub selected_names: HashSet<String>,
 
     pub selected_secret_decoded: Option<Vec<(String, String)>>,
     pub log_buffer: VecDeque<String>,
@@ -97,6 +138,7 @@ pub struct App {
     pub secret_revealed: bool,
 
     pub scale_input: String,
+    pub scale_targets: Vec<String>,
 
     pub pending_action: Option<PendingAction>,
 
@@ -106,6 +148,7 @@ pub struct App {
 
     pub shell_session: Option<ShellSession>,
     pub shell_title: String,
+    pub shell_generation: u64,
 
     pub clipboard_clear_task: Option<AbortHandle>,
 
@@ -114,6 +157,7 @@ pub struct App {
     pub log_tail_lines: i64,
     pub log_loading_history: bool,
     pub log_generation: u64,
+    pub log_stream_ended: bool,
     pub log_history_exhausted: bool,
     pub log_history_task: Option<AbortHandle>,
 
@@ -141,6 +185,7 @@ pub struct App {
     pub help_scroll: usize,
 
     pub port_forward_input: String,
+    pub port_forward_target: Option<PortForwardTarget>,
     pub port_forwards: Vec<ActivePortForward>,
     pub port_forward_list_state: ListState,
     pub port_forward_next_id: u64,
@@ -151,11 +196,15 @@ pub struct App {
 
 impl App {
     pub async fn new(
-        client: Client,
+        clients: crate::k8s::client::Clients,
     ) -> anyhow::Result<(
         Self,
         tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
     )> {
+        let crate::k8s::client::Clients {
+            api: client,
+            log_stream: log_stream_client,
+        } = clients;
         let app_state = AppState::load();
         let context = crate::k8s::config::get_current_context().unwrap_or_default();
         let namespace = app_state
@@ -168,6 +217,7 @@ impl App {
         Ok((
             Self {
                 client,
+                log_stream_client,
                 current_namespace: namespace,
                 mode: AppMode::List,
                 active_tab: ResourceType::Pod,
@@ -180,7 +230,7 @@ impl App {
                 filtered_items: Vec::new(),
                 table_state: TableState::default(),
                 filter_query: String::new(),
-                selected_indices: HashSet::new(),
+                selected_names: HashSet::new(),
                 selected_secret_decoded: None,
                 log_buffer: VecDeque::new(),
                 log_task: None,
@@ -207,18 +257,21 @@ impl App {
                 secret_table_state: TableState::default(),
                 secret_revealed: false,
                 scale_input: String::new(),
+                scale_targets: Vec::new(),
                 pending_action: None,
                 describe_content: Vec::new(),
                 describe_scroll: 0,
                 describe_hscroll: 0,
                 shell_session: None,
                 shell_title: String::new(),
+                shell_generation: 0,
                 clipboard_clear_task: None,
                 log_pod_name: String::new(),
                 log_namespace: String::new(),
                 log_tail_lines: 100,
                 log_loading_history: false,
                 log_generation: 0,
+                log_stream_ended: false,
                 log_history_exhausted: false,
                 log_history_task: None,
                 status_filter: HashSet::new(),
@@ -239,6 +292,7 @@ impl App {
                 help_return_mode: AppMode::List,
                 help_scroll: 0,
                 port_forward_input: String::new(),
+                port_forward_target: None,
                 port_forwards: Vec::new(),
                 port_forward_list_state: ListState::default(),
                 port_forward_next_id: 0,
@@ -323,9 +377,9 @@ impl App {
                 ra.cmp(&rb)
             }
             2 => {
-                let sa = Self::pod_phase(a);
-                let sb = Self::pod_phase(b);
-                sa.cmp(sb)
+                let sa = Self::pod_display_status(a);
+                let sb = Self::pod_display_status(b);
+                sa.cmp(&sb)
             }
             3 => {
                 let ra = Self::pod_restarts(a);
@@ -471,9 +525,33 @@ impl App {
         self.reset_tab_state();
     }
 
-    pub(crate) fn reset_tab_state(&mut self) {
+    pub(crate) fn clear_selection(&mut self) {
         self.table_state.select(None);
-        self.selected_indices.clear();
+        self.selected_names.clear();
+    }
+
+    pub(crate) fn reset_for_scope_change(&mut self) {
+        self.clear_selection();
+        self.items.clear();
+        self.filtered_items.clear();
+        self.pod_store = None;
+        self.deployment_store = None;
+        self.secret_store = None;
+        self.tab_loading = [false; 3];
+        self.tab_loading_since = [None; 3];
+        self.tab_forbidden = [false; 3];
+        if self
+            .last_error
+            .as_ref()
+            .is_some_and(|e| e.starts_with("Access denied"))
+        {
+            self.last_error = None;
+            self.message_time = None;
+        }
+    }
+
+    pub(crate) fn reset_tab_state(&mut self) {
+        self.clear_selection();
         self.status_filter.clear();
     }
 
@@ -515,7 +593,7 @@ impl App {
         self.log_scroll_offset = None;
         self.log_tail_lines = 100;
         self.log_loading_history = false;
-        self.log_generation += 1;
+        self.log_stream_ended = false;
         self.log_history_exhausted = false;
         self.log_hscroll = 0;
         self.log_search_query.clear();
@@ -529,11 +607,12 @@ impl App {
         self.mode = AppMode::LogView;
 
         let abort = crate::k8s::actions::stream_pod_logs(
-            self.client.clone(),
+            self.log_stream_client.clone(),
             namespace,
             pod_name,
             self.event_tx.clone(),
             self.log_tail_lines,
+            self.log_generation,
         );
         self.log_task = Some(abort);
     }
@@ -559,11 +638,20 @@ impl App {
         self.log_history_task = Some(handle);
     }
 
-    pub fn merge_log_history(&mut self, generation: u64, mut lines: Vec<String>) {
+    pub fn merge_log_history(&mut self, generation: u64, result: Result<Vec<String>, String>) {
         if generation != self.log_generation {
-            self.log_loading_history = false;
             return;
         }
+
+        let mut lines = match result {
+            Ok(lines) => lines,
+            Err(message) => {
+                self.log_loading_history = false;
+                self.log_search_pending = false;
+                self.set_error(message);
+                return;
+            }
+        };
 
         if lines.len() < self.log_tail_lines as usize {
             self.log_history_exhausted = true;
@@ -654,6 +742,15 @@ impl App {
         }
     }
 
+    pub fn take_pending_clipboard_clear(&mut self) -> Option<AbortHandle> {
+        self.clipboard_clear_task.take()
+    }
+
+    pub fn close_shell(&mut self) {
+        self.shell_session = None;
+        self.shell_generation = self.shell_generation.wrapping_add(1);
+    }
+
     pub fn abort_log_stream(&mut self) {
         if let Some(handle) = self.log_task.take() {
             handle.abort();
@@ -662,6 +759,7 @@ impl App {
             handle.abort();
         }
         self.log_search_pending = false;
+        self.log_generation = self.log_generation.wrapping_add(1);
     }
 
     pub fn context_entry_count(&self) -> usize {
@@ -715,7 +813,7 @@ impl App {
         };
 
         if !self.has_namespace() {
-            self.resolve_namespace(origin.is_verified());
+            self.resolve_namespace(origin.is_verified(), namespaces);
         }
         true
     }
@@ -724,8 +822,8 @@ impl App {
         !self.current_namespace.is_empty()
     }
 
-    fn resolve_namespace(&mut self, verified: bool) {
-        let choice = match self.available_namespaces.as_slice() {
+    fn resolve_namespace(&mut self, verified: bool, discovered: &[String]) {
+        let choice = match discovered {
             _ if !verified => None,
             [] => None,
             [only] => Some(only.clone()),
@@ -769,7 +867,7 @@ impl App {
                 Ok(ns_list) => {
                     let namespaces: Vec<String> = ns_list
                         .iter()
-                        .map(|n| n.metadata.name.clone().unwrap_or_default())
+                        .filter_map(|n| n.metadata.name.clone())
                         .collect();
                     let _ = tx.send(KubeResourceEvent::NamespacesLoaded {
                         context: ctx,
@@ -784,20 +882,19 @@ impl App {
             };
 
             if !list_denied
-                && let Ok(output) = tokio::process::Command::new("kubectl")
-                    .args([
+                && let Ok(text) = crate::k8s::kubectl::capture(
+                    &[
                         "get",
                         "namespaces",
                         "--context",
                         &ctx,
                         "-o",
                         "jsonpath={.items[*].metadata.name}",
-                    ])
-                    .output()
-                    .await
-                && output.status.success()
+                    ],
+                    crate::k8s::kubectl::DISCOVERY_TIMEOUT,
+                )
+                .await
             {
-                let text = String::from_utf8_lossy(&output.stdout);
                 let namespaces: Vec<String> = text
                     .split_whitespace()
                     .map(|s| s.to_string())
@@ -840,11 +937,11 @@ impl App {
             self.filtered_namespaces
                 .clone_from(&self.available_namespaces);
         } else {
-            let query = self.namespace_input.to_lowercase();
+            let query = self.namespace_input.to_ascii_lowercase();
             self.filtered_namespaces = self
                 .available_namespaces
                 .iter()
-                .filter(|ns| ns.to_lowercase().contains(&query))
+                .filter(|ns| contains_ascii_ci(ns, &query))
                 .cloned()
                 .collect();
         }
@@ -934,6 +1031,23 @@ impl App {
         }
     }
 
+    pub fn selected_port_forward_id(&self) -> Option<u64> {
+        let index = self.port_forward_list_state.selected()?;
+        self.port_forwards.get(index).map(|pf| pf.id)
+    }
+
+    pub fn reselect_port_forward(&mut self, id: Option<u64>) {
+        let index = id
+            .and_then(|id| self.port_forwards.iter().position(|pf| pf.id == id))
+            .or_else(|| {
+                self.port_forward_list_state
+                    .selected()
+                    .map(|i| i.min(self.port_forwards.len().saturating_sub(1)))
+            })
+            .or(Some(0));
+        self.port_forward_list_state.select(index);
+    }
+
     pub fn is_local_port_in_use(&self, port: u16) -> bool {
         self.port_forwards.iter().any(|pf| pf.local_port == port)
     }
@@ -976,8 +1090,8 @@ impl App {
         use portable_pty::{PtySize, native_pty_system};
 
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let pty_rows = (rows * 80 / 100).saturating_sub(2).max(10);
-        let pty_cols = (cols * 80 / 100).saturating_sub(2).max(40);
+        let pty_rows = scaled_to_80_percent(rows).saturating_sub(2).max(10);
+        let pty_cols = scaled_to_80_percent(cols).saturating_sub(2).max(40);
 
         let pty_system = native_pty_system();
         let pair = match pty_system.openpty(PtySize {
@@ -992,15 +1106,6 @@ impl App {
                 return;
             }
         };
-
-        match pair.slave.spawn_command(cmd) {
-            Ok(_child) => {}
-            Err(e) => {
-                self.set_error(format!("Failed to spawn command: {e}"));
-                return;
-            }
-        }
-        drop(pair.slave);
 
         let reader = match pair.master.try_clone_reader() {
             Ok(r) => r,
@@ -1018,21 +1123,34 @@ impl App {
             }
         };
 
+        let child: ShellChild = match pair.slave.spawn_command(cmd) {
+            Ok(child) => Arc::new(std::sync::Mutex::new(Some(child))),
+            Err(e) => {
+                self.set_error(format!("Failed to spawn command: {e}"));
+                return;
+            }
+        };
+        drop(pair.slave);
+
         let parser = vt100::Parser::new(pty_rows, pty_cols, 0);
 
+        self.shell_generation = self.shell_generation.wrapping_add(1);
+        let generation = self.shell_generation;
+
         let tx = self.event_tx.clone();
+        let reader_child = Arc::clone(&child);
         tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => {
-                        let _ = tx.send(KubeResourceEvent::ShellExited);
-                        break;
-                    }
+                    Ok(0) | Err(_) => break,
                     Ok(n) => {
                         if tx
-                            .send(KubeResourceEvent::ShellOutput(buf[..n].to_vec()))
+                            .send(KubeResourceEvent::ShellOutput(
+                                generation,
+                                buf[..n].to_vec(),
+                            ))
                             .is_err()
                         {
                             break;
@@ -1040,11 +1158,18 @@ impl App {
                     }
                 }
             }
+            let reaped = reader_child.lock().ok().and_then(|mut slot| slot.take());
+            if let Some(mut child) = reaped {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = tx.send(KubeResourceEvent::ShellExited(generation));
         });
 
         self.shell_session = Some(ShellSession {
             writer,
             parser,
+            child,
             _master: pair.master,
         });
         self.mode = AppMode::ShellView;
@@ -1064,6 +1189,9 @@ impl App {
                     self.log_selection_cursor -= 1;
                 }
             }
+            self.log_search_match_line = self
+                .log_search_match_line
+                .and_then(|line| line.checked_sub(1));
         }
         self.log_buffer.push_back(line);
     }
@@ -1080,21 +1208,26 @@ impl App {
         self.log_search_pending = false;
         let needle = &self.log_search_query;
         let len = self.log_buffer.len();
-        let start = self
-            .log_search_match_line
-            .and_then(|m| m.checked_sub(1))
-            .unwrap_or_else(|| {
+        let start = match self.log_search_match_line {
+            Some(0) => None,
+            Some(current) => Some(current - 1),
+            None => Some(
                 self.log_scroll_offset
                     .map(|o| (o + visible).min(len).saturating_sub(1))
-                    .unwrap_or(len.saturating_sub(1))
-            });
-        for idx in (0..=start).rev() {
-            if contains_ascii_ci(&self.log_buffer[idx], needle) {
-                self.log_search_match_line = Some(idx);
-                self.scroll_to_line(idx, visible);
-                return;
+                    .unwrap_or(len.saturating_sub(1)),
+            ),
+        };
+
+        if let Some(start) = start {
+            for idx in (0..=start).rev() {
+                if contains_ascii_ci(&self.log_buffer[idx], needle) {
+                    self.log_search_match_line = Some(idx);
+                    self.scroll_to_line(idx, visible);
+                    return;
+                }
             }
         }
+
         if self.log_history_exhausted {
             self.set_error("No more matches".to_string());
         } else {
@@ -1263,29 +1396,32 @@ impl App {
         match self.active_tab {
             ResourceType::Pod => {
                 if let Some(store) = &self.pod_store {
-                    self.items = store
-                        .state()
-                        .iter()
-                        .map(|p| KubeResource::Pod(Arc::clone(p)))
-                        .collect();
+                    self.items.extend(
+                        store
+                            .state()
+                            .iter()
+                            .map(|p| KubeResource::Pod(Arc::clone(p))),
+                    );
                 }
             }
             ResourceType::Deployment => {
                 if let Some(store) = &self.deployment_store {
-                    self.items = store
-                        .state()
-                        .iter()
-                        .map(|d| KubeResource::Deployment(Arc::clone(d)))
-                        .collect();
+                    self.items.extend(
+                        store
+                            .state()
+                            .iter()
+                            .map(|d| KubeResource::Deployment(Arc::clone(d))),
+                    );
                 }
             }
             ResourceType::Secret => {
                 if let Some(store) = &self.secret_store {
-                    self.items = store
-                        .state()
-                        .iter()
-                        .map(|s| KubeResource::Secret(Arc::clone(s)))
-                        .collect();
+                    self.items.extend(
+                        store
+                            .state()
+                            .iter()
+                            .map(|s| KubeResource::Secret(Arc::clone(s))),
+                    );
                 }
             }
         }
@@ -1295,6 +1431,14 @@ impl App {
 
     #[cfg(test)]
     pub fn new_test() -> Self {
+        Self::new_test_with_rx().0
+    }
+
+    #[cfg(test)]
+    pub fn new_test_with_rx() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
+    ) {
         use bytes::Bytes;
         use tower::ServiceBuilder;
 
@@ -1305,10 +1449,11 @@ impl App {
                 .unwrap())
         });
         let client = Client::new(ServiceBuilder::new().service(mock_service), "default");
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        Self {
-            client,
+        let app = Self {
+            client: client.clone(),
+            log_stream_client: client,
             current_namespace: "default".to_string(),
             mode: AppMode::List,
             active_tab: ResourceType::Pod,
@@ -1321,7 +1466,7 @@ impl App {
             filtered_items: Vec::new(),
             table_state: TableState::default(),
             filter_query: String::new(),
-            selected_indices: HashSet::new(),
+            selected_names: HashSet::new(),
             selected_secret_decoded: None,
             log_buffer: VecDeque::new(),
             log_task: None,
@@ -1348,18 +1493,21 @@ impl App {
             secret_table_state: TableState::default(),
             secret_revealed: false,
             scale_input: String::new(),
+            scale_targets: Vec::new(),
             pending_action: None,
             describe_content: Vec::new(),
             describe_scroll: 0,
             describe_hscroll: 0,
             shell_session: None,
             shell_title: String::new(),
+            shell_generation: 0,
             clipboard_clear_task: None,
             log_pod_name: String::new(),
             log_namespace: String::new(),
             log_tail_lines: 100,
             log_loading_history: false,
             log_generation: 0,
+            log_stream_ended: false,
             log_history_exhausted: false,
             log_history_task: None,
             status_filter: HashSet::new(),
@@ -1380,6 +1528,7 @@ impl App {
             help_return_mode: AppMode::List,
             help_scroll: 0,
             port_forward_input: String::new(),
+            port_forward_target: None,
             port_forwards: Vec::new(),
             port_forward_list_state: ListState::default(),
             port_forward_next_id: 0,
@@ -1388,7 +1537,93 @@ impl App {
                 no_persist: true,
                 ..Default::default()
             },
+        };
+        (app, rx)
+    }
+
+    pub fn pod_display_status(p: &Pod) -> std::borrow::Cow<'_, str> {
+        use std::borrow::Cow;
+
+        let phase = Self::pod_phase(p);
+        if p.metadata.deletion_timestamp.is_some() && !matches!(phase, "Succeeded" | "Failed") {
+            return Cow::Borrowed("Terminating");
         }
+
+        let status = p.status.as_ref();
+
+        if let Some(init) = status.and_then(|s| s.init_container_statuses.as_deref()) {
+            let total = p
+                .spec
+                .as_ref()
+                .and_then(|s| s.init_containers.as_ref())
+                .map_or(0, Vec::len);
+            for (i, cs) in init.iter().enumerate() {
+                let state = cs.state.as_ref();
+                if cs.started == Some(true)
+                    || state
+                        .and_then(|s| s.terminated.as_ref())
+                        .is_some_and(|t| t.exit_code == 0)
+                {
+                    continue;
+                }
+                return match Self::container_state_reason(state) {
+                    Some(reason) if reason != "PodInitializing" => {
+                        Cow::Owned(format!("Init:{reason}"))
+                    }
+                    _ => Cow::Owned(format!("Init:{i}/{total}")),
+                };
+            }
+        }
+
+        let containers = status
+            .and_then(|s| s.container_statuses.as_deref())
+            .unwrap_or_default();
+
+        let reason = containers
+            .iter()
+            .filter(|cs| !cs.ready)
+            .find_map(|cs| Self::container_state_reason(cs.state.as_ref()));
+
+        match reason {
+            Some("Completed") if containers.iter().any(Self::is_running_and_ready) => {
+                if Self::pod_is_ready(p) {
+                    Cow::Borrowed("Running")
+                } else {
+                    Cow::Borrowed("NotReady")
+                }
+            }
+            Some(reason) => Cow::Borrowed(reason),
+            None => Cow::Borrowed(status.and_then(|s| s.reason.as_deref()).unwrap_or(phase)),
+        }
+    }
+
+    fn container_state_reason(
+        state: Option<&k8s_openapi::api::core::v1::ContainerState>,
+    ) -> Option<&str> {
+        let state = state?;
+        state
+            .waiting
+            .as_ref()
+            .and_then(|w| w.reason.as_deref())
+            .or_else(|| state.terminated.as_ref().and_then(|t| t.reason.as_deref()))
+    }
+
+    fn is_running_and_ready(cs: &k8s_openapi::api::core::v1::ContainerStatus) -> bool {
+        cs.ready
+            && cs
+                .state
+                .as_ref()
+                .is_some_and(|state| state.running.is_some())
+    }
+
+    fn pod_is_ready(p: &Pod) -> bool {
+        p.status
+            .as_ref()
+            .and_then(|s| s.conditions.as_deref())
+            .into_iter()
+            .flatten()
+            .find(|c| c.type_ == "Ready")
+            .is_some_and(|c| c.status == "True")
     }
 
     pub fn pod_phase(p: &Pod) -> &str {
@@ -1403,7 +1638,9 @@ impl App {
             std::collections::BTreeMap::new();
         for item in &self.items {
             if let KubeResource::Pod(p) = item {
-                *counts.entry(Self::pod_phase(p).to_owned()).or_default() += 1;
+                *counts
+                    .entry(Self::pod_display_status(p).into_owned())
+                    .or_default() += 1;
             }
         }
         self.status_filter_items = counts.into_iter().collect();
@@ -1417,32 +1654,50 @@ impl App {
     }
 
     pub fn update_filter(&mut self) {
-        self.selected_indices.clear();
         let has_status = self.active_tab == ResourceType::Pod && !self.status_filter.is_empty();
         let has_query = !self.filter_query.is_empty();
 
         if !has_status && !has_query {
             self.filtered_items.clone_from(&self.items);
         } else {
-            let query = self.filter_query.to_lowercase();
+            let query = self.filter_query.to_ascii_lowercase();
             self.filtered_items = self
                 .items
                 .iter()
                 .filter(|item| {
                     if has_status
                         && let KubeResource::Pod(p) = item
-                        && !self.status_filter.contains(Self::pod_phase(p))
+                        && !self.status_filter.contains(&*Self::pod_display_status(p))
                     {
                         return false;
                     }
                     if has_query {
-                        return item.name().to_lowercase().contains(&query);
+                        return contains_ascii_ci(item.name(), &query);
                     }
                     true
                 })
                 .cloned()
                 .collect();
         }
+        self.prune_selection();
+    }
+
+    fn prune_selection(&mut self) {
+        if self.selected_names.is_empty() {
+            return;
+        }
+        let visible: HashSet<&str> = self.filtered_items.iter().map(KubeResource::name).collect();
+        self.selected_names
+            .retain(|name| visible.contains(name.as_str()));
+    }
+
+    pub fn selected_in_display_order(&self) -> Vec<String> {
+        self.filtered_items
+            .iter()
+            .map(KubeResource::name)
+            .filter(|name| self.selected_names.contains(*name))
+            .map(str::to_owned)
+            .collect()
     }
 }
 
@@ -1452,7 +1707,7 @@ mod tests {
     use crate::k8s::teleport::State as TeleportState;
     use crate::models::KubeResource;
     use k8s_openapi::ByteString;
-    use k8s_openapi::api::core::v1::{Pod, Secret};
+    use k8s_openapi::api::core::v1::{ContainerStatus, Pod, Secret};
     use std::collections::BTreeMap;
 
     fn make_pod(name: &str) -> KubeResource {
@@ -1497,17 +1752,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn namespace_switch_drops_selection_even_if_the_name_recurs() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("redis-0"), make_pod("web")];
+        app.update_filter();
+        app.selected_names.insert("redis-0".into());
+        app.table_state.select(Some(0));
+        app.tab_loading = [true; 3];
+        app.last_error = Some("Access denied: nope".to_string());
+
+        app.reset_for_scope_change();
+
+        assert!(app.selected_names.is_empty());
+        assert_eq!(app.table_state.selected(), None);
+        assert!(app.items.is_empty());
+        assert!(app.filtered_items.is_empty());
+        assert_eq!(app.tab_loading, [false; 3]);
+        assert!(app.last_error.is_none());
+
+        app.items = vec![make_pod("redis-0")];
+        app.update_filter();
+        assert!(app.selected_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_selection_drops_cursor_and_names_but_keeps_filters() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("redis-0")];
+        app.update_filter();
+        app.selected_names.insert("redis-0".into());
+        app.table_state.select(Some(0));
+        app.filter_query = "redis".to_string();
+        app.status_filter.insert("Running".to_string());
+
+        app.clear_selection();
+
+        assert!(app.selected_names.is_empty());
+        assert_eq!(app.table_state.selected(), None);
+        assert_eq!(app.filter_query, "redis");
+        assert!(app.status_filter.contains("Running"));
+    }
+
+    #[tokio::test]
+    async fn selection_survives_refresh_and_reorder() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("web"), make_pod("api"), make_pod("worker")];
+        app.update_filter();
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("worker".into());
+
+        app.items = vec![make_pod("worker"), make_pod("api"), make_pod("web")];
+        app.update_filter();
+
+        assert_eq!(app.selected_names.len(), 2);
+        assert_eq!(
+            app.selected_in_display_order(),
+            vec!["worker".to_string(), "web".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn selection_drops_a_resource_that_disappeared() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("web"), make_pod("api")];
+        app.update_filter();
+        app.selected_names.insert("web".into());
+        app.selected_names.insert("api".into());
+
+        app.items = vec![make_pod("api")];
+        app.update_filter();
+
+        assert_eq!(app.selected_in_display_order(), vec!["api".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn selection_is_scoped_to_the_visible_list() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("web"), make_pod("api")];
+        app.update_filter();
+        app.selected_names.insert("web".into());
+
+        app.filter_query = "api".to_string();
+        app.update_filter();
+
+        assert!(app.selected_names.is_empty());
+    }
+
+    #[tokio::test]
     async fn tab_switch_clears_ui_state() {
         let mut app = App::new_test();
         app.items = vec![make_pod("a")];
         app.filtered_items = vec![make_pod("a")];
         app.table_state.select(Some(0));
-        app.selected_indices.insert(0);
+        app.selected_names.insert("a".into());
 
         app.next_tab();
 
         assert_eq!(app.table_state.selected(), None);
-        assert!(app.selected_indices.is_empty());
+        assert!(app.selected_names.is_empty());
+    }
+
+    async fn await_shell_exit(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<KubeResourceEvent>,
+    ) -> u64 {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await.expect("event channel closed") {
+                    KubeResourceEvent::ShellExited(g) => return g,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("reader thread never reported the session exit")
+    }
+
+    #[tokio::test]
+    async fn reader_reaps_child_so_drop_cannot_signal_a_freed_pid() {
+        let (mut app, mut rx) = App::new_test_with_rx();
+        let mut cmd = portable_pty::CommandBuilder::new("sh");
+        cmd.args(["-c", "exit 0"]);
+
+        app.spawn_pty_session(cmd);
+        await_shell_exit(&mut rx).await;
+
+        let session = app.shell_session.as_ref().expect("session left in place");
+        assert!(
+            session.child.lock().expect("child slot poisoned").is_none(),
+            "reader must take the child out of the slot before reaping it"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_shell_session_kills_child_and_frees_reader() {
+        let (mut app, mut rx) = App::new_test_with_rx();
+        let mut cmd = portable_pty::CommandBuilder::new("sleep");
+        cmd.arg("120");
+
+        app.spawn_pty_session(cmd);
+        assert!(app.shell_session.is_some());
+        let generation = app.shell_generation;
+
+        app.shell_session = None;
+
+        let exited = await_shell_exit(&mut rx).await;
+
+        assert_eq!(exited, generation);
+    }
+
+    #[tokio::test]
+    async fn filtering_is_case_insensitive() {
+        let mut app = App::new_test();
+        app.items = vec![make_pod("Web-Frontend"), make_pod("api")];
+        app.filter_query = "WEB".to_string();
+        app.update_filter();
+        assert_eq!(app.filtered_items.len(), 1);
+        assert_eq!(app.filtered_items[0].name(), "Web-Frontend");
+
+        app.filter_query = "web-front".to_string();
+        app.update_filter();
+        assert_eq!(app.filtered_items.len(), 1);
     }
 
     #[tokio::test]
@@ -1680,7 +2084,7 @@ mod tests {
             "line4".into(),
             "line5".into(),
         ];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert_eq!(app.log_buffer.len(), 5);
         assert_eq!(app.log_buffer[0], "line1");
@@ -1711,7 +2115,7 @@ mod tests {
             "line7".into(),
             "line8".into(),
         ];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert_eq!(app.log_buffer.len(), 8);
         assert_eq!(app.log_buffer[0], "line1");
@@ -1722,17 +2126,258 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_new_stream_clears_the_ended_marker() {
+        let mut app = App::new_test();
+        app.log_stream_ended = true;
+
+        app.stream_logs("nginx", "default");
+
+        assert!(!app.log_stream_ended);
+    }
+
+    fn windows_find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+        if needle.is_empty() || needle.len() > hay.len() {
+            return None;
+        }
+        hay[from..]
+            .windows(needle.len())
+            .position(|w| w.eq_ignore_ascii_case(needle))
+            .map(|p| p + from)
+    }
+
+    #[test]
+    fn find_ascii_ci_matches_a_plain_window_scan() {
+        let cases: &[(&str, &str)] = &[
+            ("", "a"),
+            ("a", ""),
+            ("short", "much longer needle"),
+            ("aaab", "aab"),
+            ("abcabcabd", "abcabd"),
+            ("MiXeD CaSe", "mixed"),
+            ("level=info level=error", "level=error"),
+            ("no match here", "zzz"),
+            ("eeeeeeeex", "eeeeeeeee"),
+            ("é level=error", "level=error"),
+        ];
+        for (hay, needle) in cases {
+            for from in 0..=hay.len() {
+                assert_eq!(
+                    find_ascii_ci(hay.as_bytes(), needle.as_bytes(), from),
+                    windows_find(hay.as_bytes(), needle.as_bytes(), from),
+                    "hay={hay:?} needle={needle:?} from={from}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn find_ascii_ci_tolerates_an_uppercase_needle() {
+        assert_eq!(find_ascii_ci(b"an error", b"ERROR", 0), Some(3));
+        assert!(contains_ascii_ci("an error", "ERROR"));
+    }
+
+    #[test]
+    fn find_ascii_ci_empty_needle_is_none_while_contains_says_true() {
+        assert_eq!(find_ascii_ci(b"anything", b"", 0), None);
+        assert!(contains_ascii_ci("anything", ""));
+        assert!(!contains_ascii_ci("", "a"));
+        assert!(contains_ascii_ci("Level=ERROR", "level=error"));
+    }
+
+    #[test]
+    fn find_ascii_ci_past_the_end_does_not_panic() {
+        assert_eq!(find_ascii_ci(b"short", b"s", 99), None);
+    }
+
+    #[test]
+    fn find_ascii_ci_reports_every_occurrence_in_order() {
+        let hay = b"ERR x err y Err";
+        let mut found = Vec::new();
+        let mut at = 0;
+        while let Some(pos) = find_ascii_ci(hay, b"err", at) {
+            found.push(pos);
+            at = pos + 3;
+        }
+        assert_eq!(found, vec![0, 6, 12]);
+    }
+
+    #[tokio::test]
+    async fn search_at_the_top_of_the_buffer_loads_history() {
+        let mut app = App::new_test();
+        app.log_search_query = "err".into();
+        app.log_buffer = ["err zero", "quiet", "err ten"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        app.log_search_match_line = Some(0);
+        app.log_history_exhausted = false;
+
+        app.log_search_next_with_height(3);
+
+        assert!(
+            app.log_search_pending,
+            "reaching the top must fetch more history"
+        );
+        assert_eq!(app.log_search_match_line, Some(0));
+    }
+
+    #[tokio::test]
+    async fn search_at_the_top_reports_exhaustion_rather_than_jumping_forward() {
+        let mut app = App::new_test();
+        app.log_search_query = "err".into();
+        app.log_buffer = ["err zero", "quiet", "err ten"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        app.log_search_match_line = Some(0);
+        app.log_history_exhausted = true;
+
+        app.log_search_next_with_height(3);
+
+        assert_eq!(app.log_search_match_line, Some(0));
+        assert!(app.last_error.is_some());
+    }
+
+    #[test]
+    fn pty_size_does_not_overflow_on_a_very_tall_terminal() {
+        assert_eq!(scaled_to_80_percent(1000), 800);
+        assert_eq!(scaled_to_80_percent(u16::MAX), 52428);
+        assert_eq!(scaled_to_80_percent(24), 19);
+    }
+
+    #[tokio::test]
+    async fn eviction_shifts_the_search_match_line() {
+        let mut app = App::new_test();
+        for i in 0..MAX_LOG_LINES {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_search_match_line = Some(10);
+
+        app.push_log_line("new".into());
+
+        assert_eq!(app.log_search_match_line, Some(9));
+        assert_eq!(app.log_buffer[9], "line 10");
+    }
+
+    #[tokio::test]
+    async fn eviction_drops_a_search_match_that_falls_off_the_front() {
+        let mut app = App::new_test();
+        for i in 0..MAX_LOG_LINES {
+            app.log_buffer.push_back(format!("line {i}"));
+        }
+        app.log_search_match_line = Some(0);
+
+        app.push_log_line("new".into());
+
+        assert_eq!(app.log_search_match_line, None);
+    }
+
+    fn active_forward(id: u64, port: u16) -> ActivePortForward {
+        ActivePortForward {
+            id,
+            pod_name: format!("pod-{id}"),
+            namespace: "default".into(),
+            local_port: port,
+            remote_port: 80,
+            abort_handle: tokio::spawn(async {}).abort_handle(),
+            started_at: std::time::Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_forward_dying_on_its_own_does_not_move_the_cursor() {
+        let mut app = App::new_test();
+        app.port_forwards = vec![
+            active_forward(1, 8001),
+            active_forward(2, 8002),
+            active_forward(3, 8003),
+        ];
+        app.port_forward_list_state.select(Some(1));
+
+        let selected = app.selected_port_forward_id();
+        assert_eq!(selected, Some(2));
+        app.port_forwards.retain(|pf| pf.id != 1);
+        app.reselect_port_forward(selected);
+
+        assert_eq!(app.selected_port_forward_id(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn losing_the_selected_forward_clamps_the_cursor() {
+        let mut app = App::new_test();
+        app.port_forwards = vec![active_forward(1, 8001), active_forward(2, 8002)];
+        app.port_forward_list_state.select(Some(1));
+
+        let selected = app.selected_port_forward_id();
+        app.port_forwards.retain(|pf| pf.id != 2);
+        app.reselect_port_forward(selected);
+
+        assert_eq!(app.port_forward_list_state.selected(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn pending_clipboard_clear_is_taken_once() {
+        let mut app = App::new_test();
+        assert!(app.take_pending_clipboard_clear().is_none());
+
+        app.clipboard_clear_task = Some(tokio::spawn(async {}).abort_handle());
+        assert!(app.take_pending_clipboard_clear().is_some());
+        assert!(app.take_pending_clipboard_clear().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_history_fetch_releases_the_loading_flags() {
+        let mut app = App::new_test();
+        app.log_generation = 2;
+        app.log_loading_history = true;
+        app.log_search_pending = true;
+
+        app.merge_log_history(2, Err("Log history error: gone".into()));
+
+        assert!(!app.log_loading_history);
+        assert!(!app.log_search_pending);
+        assert!(app.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_failed_history_leaves_the_current_fetch_alone() {
+        let mut app = App::new_test();
+        app.log_generation = 2;
+        app.log_loading_history = true;
+        app.log_search_pending = true;
+
+        app.merge_log_history(1, Err("Log history error: gone".into()));
+
+        assert!(app.log_loading_history);
+        assert!(app.log_search_pending);
+        assert!(app.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn leaving_the_log_view_bumps_the_generation() {
+        let mut app = App::new_test();
+        let before = app.log_generation;
+
+        app.abort_log_stream();
+
+        assert_ne!(app.log_generation, before);
+    }
+
+    #[tokio::test]
     async fn merge_log_history_discards_wrong_generation() {
         let mut app = App::new_test();
         app.log_generation = 2;
         app.log_buffer.push_back("current".into());
         app.log_loading_history = true;
 
-        app.merge_log_history(1, vec!["old".into(), "current".into()]);
+        app.merge_log_history(1, Ok(vec!["old".into(), "current".into()]));
 
         assert_eq!(app.log_buffer.len(), 1);
         assert_eq!(app.log_buffer[0], "current");
-        assert!(!app.log_loading_history);
+        assert!(
+            app.log_loading_history,
+            "a stale result must not clear the flag owned by the in-flight fetch"
+        );
     }
 
     #[tokio::test]
@@ -1743,7 +2388,7 @@ mod tests {
         app.log_buffer.push_back("line1".into());
         app.log_loading_history = true;
 
-        app.merge_log_history(1, vec!["line1".into()]);
+        app.merge_log_history(1, Ok(vec!["line1".into()]));
 
         assert!(app.log_history_exhausted);
     }
@@ -1760,7 +2405,7 @@ mod tests {
 
         let mut history: Vec<String> = (0..10).map(|i| format!("new{i}")).collect();
         history.push("existing0".into());
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert_eq!(app.log_buffer.len(), MAX_LOG_LINES);
         assert_eq!(app.log_buffer[0], "new8");
@@ -2010,7 +2655,7 @@ mod tests {
         app.log_loading_history = true;
 
         let history = vec!["target found".into(), "existing".into()];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert!(!app.log_search_pending);
         assert_eq!(app.log_search_match_line, Some(0));
@@ -2027,7 +2672,7 @@ mod tests {
         app.log_loading_history = true;
 
         let history = vec!["other line".into(), "existing".into()];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert!(!app.log_search_pending);
         assert!(app.last_success.as_ref().unwrap().contains("press n"));
@@ -2044,7 +2689,7 @@ mod tests {
         app.log_loading_history = true;
 
         let history = vec!["other line".into(), "existing".into()];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert!(!app.log_search_pending);
         assert!(app.last_error.as_ref().unwrap().contains("Not found"));
@@ -2061,7 +2706,7 @@ mod tests {
         app.log_loading_history = true;
 
         let history = vec!["new1".into(), "new2".into(), "match line".into()];
-        app.merge_log_history(1, history);
+        app.merge_log_history(1, Ok(history));
 
         assert_eq!(app.log_search_match_line, Some(2));
     }
@@ -2127,6 +2772,252 @@ mod tests {
             ..Default::default()
         });
         KubeResource::Pod(Arc::new(pod))
+    }
+
+    fn pod_with_status(phase: &str, statuses: Vec<ContainerStatus>) -> Pod {
+        Pod {
+            status: Some(k8s_openapi::api::core::v1::PodStatus {
+                phase: Some(phase.to_string()),
+                container_statuses: Some(statuses),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn waiting_container(reason: &str) -> ContainerStatus {
+        ContainerStatus {
+            ready: false,
+            state: Some(k8s_openapi::api::core::v1::ContainerState {
+                waiting: Some(k8s_openapi::api::core::v1::ContainerStateWaiting {
+                    reason: Some(reason.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn pod_with_waiting_reason(reason: &str) -> Pod {
+        pod_with_status("Running", vec![waiting_container(reason)])
+    }
+
+    #[test]
+    fn crashlooping_pod_reports_the_waiting_reason_not_running() {
+        let pod = pod_with_waiting_reason("CrashLoopBackOff");
+        assert_eq!(App::pod_phase(&pod), "Running");
+        assert_eq!(App::pod_display_status(&pod), "CrashLoopBackOff");
+    }
+
+    fn init_pod(total: usize, init: Vec<ContainerStatus>, main: Vec<ContainerStatus>) -> Pod {
+        Pod {
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                init_containers: Some(vec![Default::default(); total]),
+                ..Default::default()
+            }),
+            status: Some(k8s_openapi::api::core::v1::PodStatus {
+                phase: Some("Pending".to_string()),
+                init_container_statuses: Some(init),
+                container_statuses: Some(main),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn failing_init_container_is_not_masked_as_pod_initializing() {
+        let pod = init_pod(
+            2,
+            vec![waiting_container("CrashLoopBackOff")],
+            vec![waiting_container("PodInitializing")],
+        );
+        assert_eq!(App::pod_display_status(&pod), "Init:CrashLoopBackOff");
+        assert_eq!(
+            crate::ui::theme::status_color("Init:CrashLoopBackOff"),
+            crate::ui::theme::COLOR_STATUS_ERROR
+        );
+    }
+
+    #[test]
+    fn init_in_progress_reports_position() {
+        let pod = init_pod(
+            3,
+            vec![
+                ContainerStatus {
+                    ready: true,
+                    state: Some(k8s_openapi::api::core::v1::ContainerState {
+                        terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                            exit_code: 0,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                waiting_container("PodInitializing"),
+            ],
+            vec![waiting_container("PodInitializing")],
+        );
+        assert_eq!(App::pod_display_status(&pod), "Init:1/3");
+        assert_eq!(
+            crate::ui::theme::status_color("Init:1/3"),
+            crate::ui::theme::COLOR_STATUS_PENDING
+        );
+    }
+
+    #[test]
+    fn completed_helper_beside_a_running_app_still_reports_running() {
+        let mut pod = pod_with_status(
+            "Running",
+            vec![
+                ContainerStatus {
+                    ready: true,
+                    state: Some(k8s_openapi::api::core::v1::ContainerState {
+                        running: Some(Default::default()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                ContainerStatus {
+                    ready: false,
+                    state: Some(k8s_openapi::api::core::v1::ContainerState {
+                        terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                            reason: Some("Completed".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert_eq!(App::pod_display_status(&pod), "NotReady");
+
+        if let Some(status) = pod.status.as_mut() {
+            status.conditions = Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                type_: "Ready".to_string(),
+                status: "True".to_string(),
+                ..Default::default()
+            }]);
+        }
+        assert_eq!(App::pod_display_status(&pod), "Running");
+    }
+
+    #[test]
+    fn evicted_pod_reports_the_status_reason() {
+        let pod = Pod {
+            status: Some(k8s_openapi::api::core::v1::PodStatus {
+                phase: Some("Failed".to_string()),
+                reason: Some("Evicted".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(App::pod_display_status(&pod), "Evicted");
+    }
+
+    #[test]
+    fn deleted_finished_pod_keeps_its_terminal_status() {
+        let mut pod = pod_with_status(
+            "Succeeded",
+            vec![ContainerStatus {
+                ready: false,
+                state: Some(k8s_openapi::api::core::v1::ContainerState {
+                    terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                        reason: Some("Completed".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        );
+        pod.metadata.deletion_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::UNIX_EPOCH),
+        );
+        assert_eq!(App::pod_display_status(&pod), "Completed");
+    }
+
+    #[test]
+    fn image_pull_failure_is_visible() {
+        let pod = pod_with_waiting_reason("ImagePullBackOff");
+        assert_eq!(App::pod_display_status(&pod), "ImagePullBackOff");
+    }
+
+    #[test]
+    fn deleting_pod_reports_terminating() {
+        let mut pod = pod_with_waiting_reason("CrashLoopBackOff");
+        pod.metadata.deletion_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(jiff::Timestamp::UNIX_EPOCH),
+        );
+        assert_eq!(App::pod_display_status(&pod), "Terminating");
+    }
+
+    #[test]
+    fn ready_containers_keep_the_phase() {
+        let pod = pod_with_status(
+            "Running",
+            vec![ContainerStatus {
+                ready: true,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(App::pod_display_status(&pod), "Running");
+    }
+
+    #[test]
+    fn pod_without_container_statuses_falls_back_to_phase() {
+        let pod = pod_with_status("Pending", Vec::new());
+        assert_eq!(App::pod_display_status(&pod), "Pending");
+        assert_eq!(App::pod_display_status(&Pod::default()), "Unknown");
+    }
+
+    #[test]
+    fn finished_pod_reports_completed_like_kubectl() {
+        let pod = pod_with_status(
+            "Succeeded",
+            vec![ContainerStatus {
+                ready: false,
+                state: Some(k8s_openapi::api::core::v1::ContainerState {
+                    terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                        reason: Some("Completed".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(App::pod_display_status(&pod), "Completed");
+    }
+
+    #[tokio::test]
+    async fn status_filter_matches_the_displayed_status() {
+        let mut app = App::new_test();
+        app.active_tab = ResourceType::Pod;
+        let mut crashing = pod_with_waiting_reason("CrashLoopBackOff");
+        crashing.metadata.name = Some("crashing".to_string());
+        let mut healthy = pod_with_status("Running", Vec::new());
+        healthy.metadata.name = Some("healthy".to_string());
+        app.items = vec![
+            KubeResource::Pod(Arc::new(crashing)),
+            KubeResource::Pod(Arc::new(healthy)),
+        ];
+
+        app.build_status_filter_items();
+        let statuses: Vec<&str> = app
+            .status_filter_items
+            .iter()
+            .map(|(s, _)| s.as_str())
+            .collect();
+        assert!(statuses.contains(&"CrashLoopBackOff"), "{statuses:?}");
+
+        app.status_filter.insert("CrashLoopBackOff".to_string());
+        app.update_filter();
+        assert_eq!(app.filtered_items.len(), 1);
+        assert_eq!(app.filtered_items[0].name(), "crashing");
     }
 
     #[tokio::test]
@@ -2489,13 +3380,13 @@ mod tests {
 
         app.merge_log_history(
             1,
-            vec![
+            Ok(vec![
                 "line1".into(),
                 "line2".into(),
                 "line3".into(),
                 "line4".into(),
                 "line5".into(),
-            ],
+            ]),
         );
 
         assert_eq!(app.log_selection_anchor, Some(2));
@@ -2705,6 +3596,32 @@ mod tests {
         app.app_state.add_namespace("ctx-a", "old-ns");
         assert!(app.apply_namespaces("ctx-a", &["new-ns".to_string()], &NamespaceOrigin::Listed));
         assert_eq!(app.available_namespaces, vec!["new-ns", "old-ns"]);
+    }
+
+    #[tokio::test]
+    async fn a_stale_default_never_beats_a_fresh_list() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.app_state.add_namespace("ctx-a", "default");
+
+        app.apply_namespaces("ctx-a", &["team-a".to_string()], &NamespaceOrigin::Listed);
+
+        assert_eq!(app.current_namespace, "team-a");
+        assert!(app.available_namespaces.contains(&"default".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_stale_entry_does_not_suppress_the_single_namespace_rule() {
+        let mut app = App::new_test();
+        app.current_context = "ctx-a".into();
+        app.current_namespace = String::new();
+        app.app_state.add_namespace("ctx-a", "gone-ns");
+
+        app.apply_namespaces("ctx-a", &["team-a".to_string()], &NamespaceOrigin::Listed);
+
+        assert_eq!(app.current_namespace, "team-a");
+        assert_eq!(app.mode, AppMode::List);
     }
 
     #[tokio::test]
